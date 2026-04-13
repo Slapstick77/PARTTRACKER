@@ -2,6 +2,11 @@
 __pycache__/
 *.py[cod]
 
+TestData/Amada/**
+TestData/EMK1Test/**
+TestData/Laser/**
+TestData/Programming folders/**
+
 Application/data/admin_settings.json
 Application/data/completed_scan_list.json
 Application/data/import_error.log
