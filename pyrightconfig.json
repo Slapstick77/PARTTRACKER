@@ -1,0 +1,14 @@
+{
+  "include": [
+    "Application/src",
+    "Application/scripts"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "Application/src"
+      ]
+    }
+  ]
+}

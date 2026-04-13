@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Formed Part Scanner</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
+  </head>
+  <body>
+    <main class="page-shell formed-page-shell">
+      <section class="top-panel">
+        <div class="panel-title-row">
+          <div class="title-block">
+            <h1>Formed Scanner</h1>
+            <p class="muted">Load DAT token, scan formed parts, then review and send to part tracker</p>
+          </div>
+          <div class="header-actions">
+            <a href="{{ url_for('completed_list') }}" class="button-link">View List</a>
+            <a href="{{ url_for('admin_home') }}" class="button-link">Admin</a>
+            <a href="{{ url_for('home') }}" class="button-link">Back to Main</a>
+          </div>
+        </div>
+
+        <div class="nav-tabs">
+          <a href="{{ url_for('home') }}" class="nav-tab">Main Scanner</a>
+          <a href="{{ url_for('formed_home') }}" class="nav-tab active">Formed Scanner</a>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <div class="flash-stack">
+              {% for category, message in messages %}
+                <div class="flash {{ category }}">{{ message }}</div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+
+        <div class="controls-layout formed-controls-layout">
+          <div class="control-column">
+            <form method="post" action="{{ url_for('formed_scan_dat') }}" class="scan-box compact {% if active_field == 'dat_token' %}active{% endif %}">
+              <label>DAT TOKEN</label>
+              <input name="value" placeholder="Scan DAT (example: SCDDAGFY.DAT)" {% if active_field == 'dat_token' and not review_mode %}autofocus{% endif %} {% if review_mode %}disabled{% endif %}>
+            </form>
+
+            <form method="post" action="{{ url_for('formed_scan_part') }}" class="scan-box part-scan-box {% if active_field == 'part_scan' %}active{% endif %}">
+              <label>FORMED PART SCAN</label>
+              <input name="value" placeholder="Scan formed part barcode" {% if active_field == 'part_scan' and not review_mode %}autofocus{% endif %} {% if review_mode %}disabled{% endif %}>
+            </form>
+          </div>
+
+          <div class="status-column">
+            <div class="message-card hero-message {{ message_level or 'info' }}">{{ message }}</div>
+
+            <div class="summary-strip">
+              <div class="summary-card"><span>Expected</span><strong>{{ total_expected }}</strong></div>
+              <div class="summary-card"><span>Scanned</span><strong>{{ total_scanned }}</strong></div>
+              <div class="summary-card"><span>Queued DATs</span><strong>{{ queue|length }}</strong></div>
+            </div>
+
+            {% if can_complete or can_force_complete %}
+            <div class="completion-actions">
+              {% if can_complete %}
+              <form method="post" action="{{ url_for('formed_complete_batch') }}" class="complete-form compact-action-form">
+                <button type="submit" class="complete-button compact-button">OK Send to Part Tracker</button>
+              </form>
+              {% endif %}
+              {% if can_force_complete %}
+              <form method="post" action="{{ url_for('formed_force_complete_batch') }}" class="complete-form compact-action-form">
+                <button type="submit" class="secondary warning compact-button">Force Complete</button>
+              </form>
+              {% endif %}
+            </div>
+            {% endif %}
+
+            <div class="queue-panel">
+              <h3>Queued DAT tokens</h3>
+              {% if queue %}
+                <div class="queue-token-list">
+                  {% for item in queue %}
+                    <div class="queue-token-item">
+                      <strong>{{ item.dat_name }}</strong>
+                      <span>{{ item.parts | length }} formed scans queued</span>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <p class="empty-state">No queued formed DAT lists yet. Scan a DAT on Main Scanner first.</p>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {% if review_mode %}
+      <section class="formed-lists-panel">
+        <article class="list-pane list-full-pane review-pane formed-review-pane">
+          <div class="pane-header review-header">
+            <div>
+              <p class="eyebrow">Formed batch review</p>
+              <h2>Review formed rows before sending</h2>
+            </div>
+            <div class="review-counts">
+              <span>{{ review_rows|length }} scanned</span>
+              <span>{{ review_missed_rows|length }} missed</span>
+            </div>
+          </div>
+
+          <form method="post" action="{{ url_for('formed_save_review') }}" class="review-form">
+            <input type="hidden" name="formed_scanned_count" value="{{ review_rows|length }}">
+            <input type="hidden" name="formed_missed_count" value="{{ review_missed_rows|length }}">
+
+            <div class="review-actions">
+              <button type="submit" formaction="{{ url_for('formed_edit_review') }}" class="secondary">Edit</button>
+              <button type="submit" formaction="{{ url_for('formed_add_manual_review_row') }}" class="secondary" {% if not review_edit_mode %}disabled{% endif %}>Add Manual Part</button>
+              <button type="submit" class="complete-button">Save and Send to Part Tracker</button>
+            </div>
+
+            <div class="table-wrap review-table-wrap">
+              <table class="review-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Machine</th>
+                    <th>User</th>
+                    <th>Location</th>
+                    <th>DAT</th>
+                    <th>Part</th>
+                    <th>Rev</th>
+                    <th>COM#</th>
+                    <th>F Flag</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in review_rows %}
+                  <tr>
+                    <td><span class="status-pill scanned">Scanned</span></td>
+                    <td><input name="formed_scanned__{{ loop.index0 }}__machine" value="{{ row.machine }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_scanned__{{ loop.index0 }}__user" value="{{ row.user }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_scanned__{{ loop.index0 }}__location" value="{{ row.location }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_scanned__{{ loop.index0 }}__nest_data" value="{{ row.nest_data }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_scanned__{{ loop.index0 }}__part_number" value="{{ row.part_number }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_scanned__{{ loop.index0 }}__part_revision" value="{{ row.part_revision }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_scanned__{{ loop.index0 }}__com_number" value="{{ row.com_number }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_scanned__{{ loop.index0 }}__f_flag" value="{{ 'Y' if row.f_flag else 'N' }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                  </tr>
+                  {% endfor %}
+                  {% for row in review_missed_rows %}
+                  <tr>
+                    <td><span class="status-pill missed">Missed</span></td>
+                    <td><input name="formed_missed__{{ loop.index0 }}__machine" value="{{ row.machine }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_missed__{{ loop.index0 }}__user" value="{{ row.user }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_missed__{{ loop.index0 }}__location" value="{{ row.location }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_missed__{{ loop.index0 }}__nest_data" value="{{ row.nest_data }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_missed__{{ loop.index0 }}__part_number" value="{{ row.part_number }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_missed__{{ loop.index0 }}__part_revision" value="{{ row.part_revision }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_missed__{{ loop.index0 }}__com_number" value="{{ row.com_number }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="formed_missed__{{ loop.index0 }}__f_flag" value="{{ 'Y' if row.f_flag else 'N' }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </form>
+        </article>
+      </section>
+      {% else %}
+      <section class="formed-lists-panel">
+        {% if lists %}
+          <div class="formed-list-grid">
+            {% for dat_list in lists %}
+              <article class="formed-list-card">
+                <header class="formed-list-header">
+                  <div>
+                    <h2>{{ dat_list.dat_name }}</h2>
+                    {% if dat_list.com_numbers %}
+                      <div class="formed-com-stack">
+                        {% for com in dat_list.com_numbers %}
+                          <div class="formed-com-line">COM# {{ com }}</div>
+                        {% endfor %}
+                      </div>
+                    {% endif %}
+                  </div>
+                  <div class="formed-list-counts">
+                    <span>Expected: {{ dat_list.expected_parts | length }}</span>
+                    <span>Scanned: {{ dat_list.scanned_parts | length }}</span>
+                  </div>
+                </header>
+
+                <div class="formed-list-columns">
+                  <div>
+                    <p class="eyebrow">Expected</p>
+                    {% if dat_list.expected_parts %}
+                      <div class="part-list">
+                        {% for part in dat_list.expected_parts %}
+                          <div class="part-card">
+                            <span class="part-line"><strong>{{ part.part_number }}</strong>{% if part.com_number %} · COM# {{ part.com_number }}{% endif %}</span>
+                          </div>
+                        {% endfor %}
+                      </div>
+                    {% else %}
+                      <p class="empty-state">All expected scans complete for this DAT.</p>
+                    {% endif %}
+                  </div>
+
+                  <div>
+                    <p class="eyebrow">Scanned</p>
+                    {% if dat_list.scanned_parts %}
+                      <div class="part-list">
+                        {% for part in dat_list.scanned_parts %}
+                          <div class="part-card scanned">
+                            <span class="part-line"><strong>{{ part.part_number }}</strong></span>
+                            <span class="part-meta">DAT {{ dat_list.dat_name }}{% if part.com_number %} · COM# {{ part.com_number }}{% endif %}</span>
+                          </div>
+                        {% endfor %}
+                      </div>
+                    {% else %}
+                      <p class="empty-state">No formed parts scanned yet.</p>
+                    {% endif %}
+                  </div>
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <article class="list-pane list-full-pane">
+            <p class="empty-state">No active formed lists loaded yet. Scan DAT tokens to load one or more lists.</p>
+          </article>
+        {% endif %}
+      </section>
+      {% endif %}
+    </main>
+
+    <script>
+      document.querySelectorAll('.scan-box input:not([disabled])').forEach((input) => {
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.currentTarget.form.submit();
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

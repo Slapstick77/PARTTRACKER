@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Admin Settings</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
+  </head>
+  <body>
+    <main class="page-shell admin-page-shell">
+      <section class="top-panel admin-top-panel">
+        <div class="panel-title-row">
+          <div class="title-block">
+            <h1>Admin Settings</h1>
+            <p class="muted">Username {{ admin_username }}. Manage active source folders, manual imports, and automatic checks.</p>
+          </div>
+          <div class="header-actions">
+            <a href="{{ url_for('home') }}" class="button-link">Back to Scanner</a>
+            <form method="post" action="{{ url_for('admin_logout') }}">
+              <button type="submit" class="secondary">Log Out</button>
+            </form>
+          </div>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <div class="flash-stack">
+              {% for category, message in messages %}
+                <div class="flash {{ category }}">{{ message }}</div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+      </section>
+
+      <section class="bottom-panel admin-bottom-panel">
+        <article class="list-pane left-pane admin-settings-pane">
+          <div class="pane-header">
+            <div>
+              <p class="eyebrow">Source folders</p>
+              <h2>Test or production</h2>
+            </div>
+          </div>
+
+          <form method="post" action="{{ url_for('save_admin_settings') }}" class="admin-settings-form">
+            {% for source in sources %}
+            <section class="folder-card">
+              <div class="folder-card-header">
+                <div>
+                  <h3>{{ source.label }}</h3>
+                  <p class="muted">Selected: {{ source.selected_path or 'No folder selected' }}</p>
+                </div>
+                <span class="status-pill {% if source.exists %}scanned{% else %}missed{% endif %}">
+                  {% if source.exists %}Ready{% else %}Missing{% endif %}
+                </span>
+              </div>
+
+              <div class="toggle-row">
+                <label class="toggle-option">
+                  <input type="radio" name="source_mode_{{ source.key }}" value="test" {% if source.selected_mode == 'test' %}checked{% endif %}>
+                  <span>Test folder</span>
+                </label>
+                <label class="toggle-option">
+                  <input type="radio" name="source_mode_{{ source.key }}" value="production" {% if source.selected_mode == 'production' %}checked{% endif %}>
+                  <span>Production folder</span>
+                </label>
+              </div>
+
+              <label class="settings-field readonly-field">
+                <span>Test folder</span>
+                <input value="{{ source.test_path }}" readonly>
+              </label>
+
+              <label class="settings-field">
+                <span>Production folder</span>
+                <input name="production_path_{{ source.key }}" value="{{ source.production_path }}" placeholder="Enter production folder path">
+              </label>
+            </section>
+            {% endfor %}
+
+            <section class="folder-card">
+              <div class="folder-card-header">
+                <div>
+                  <h3>Automatic check</h3>
+                  <p class="muted">The background monitor only scans .DAT files and NestComparison.csv files.</p>
+                  <p class="muted">Amada, EMK1, and Laser scan only the selected folder. Programming folders still scan subfolders.</p>
+                  <p class="muted">Supported files older than 6 months are skipped automatically.</p>
+                </div>
+              </div>
+
+              <label class="settings-field short-field">
+                <span>Minutes between checks</span>
+                <input name="poll_interval_minutes" type="number" min="0" step="1" value="{{ settings.poll_interval_minutes }}">
+              </label>
+              <p class="muted helper-text">Use 0 to disable automatic checks.</p>
+
+              <label class="settings-field short-field">
+                <span>Daily correction run time</span>
+                <input name="correction_schedule_time" type="time" value="{{ settings.correction_schedule_time or '' }}">
+              </label>
+              <p class="muted helper-text">Leave blank to disable the daily correction run.</p>
+            </section>
+
+            <button type="submit">Save Settings</button>
+          </form>
+        </article>
+
+        <article class="list-pane right-pane admin-actions-pane">
+          <div class="pane-header">
+            <div>
+              <p class="eyebrow">Import actions</p>
+              <h2>Run and reset</h2>
+            </div>
+          </div>
+
+          <div class="admin-action-stack">
+            <form method="post" action="{{ url_for('admin_import_now') }}" class="admin-action-card">
+              <h3>Look For New Files</h3>
+              <p class="muted">Force a scan of the active folders, parse supported files, and update the database tables without freezing the page.</p>
+              <button type="submit">Look For New Files</button>
+            </form>
+
+            <form method="post" action="{{ url_for('admin_correction_now') }}" class="admin-action-card">
+              <h3>Run Correction Pass</h3>
+              <p class="muted">Reevaluate existing imported DAT barcodes, apply duplicate logic again where needed, and refresh corrected resolved matches. This run is slower than a normal import.</p>
+              <button type="submit" class="secondary">Run Correction Pass</button>
+            </form>
+
+            <section class="admin-action-card status-card" id="import-monitor-card">
+              <h3>Import monitor</h3>
+              <div class="monitor-phase-row">
+                <span class="status-pill {% if import_monitor.status == 'success' %}scanned{% elif import_monitor.status == 'error' %}missed{% endif %}" id="monitor-status-pill">{{ import_monitor.status or 'idle' }}</span>
+                <strong id="monitor-phase">{{ import_monitor.phase or 'Idle' }}</strong>
+              </div>
+              <div class="progress-bar-shell" aria-label="Import progress">
+                <div class="progress-bar-fill" id="monitor-progress-bar" style="width: {{ import_monitor.progress_percent or 0 }}%;"></div>
+              </div>
+              <div class="status-grid monitor-grid">
+                <div><span>Progress</span><strong id="monitor-progress-text">{{ import_monitor.progress_percent or 0 }}%</strong></div>
+                <div><span>Step</span><strong id="monitor-step-text">{{ import_monitor.current_step or 0 }} / {{ import_monitor.total_steps or 0 }}</strong></div>
+                <div><span>Processed</span><strong id="monitor-processed">{{ import_monitor.processed or 0 }}</strong></div>
+                <div><span>Skipped</span><strong id="monitor-skipped">{{ import_monitor.skipped or 0 }}</strong></div>
+                <div><span>Errors</span><strong id="monitor-errors">{{ import_monitor.errors or 0 }}</strong></div>
+                <div><span>Trigger</span><strong id="monitor-trigger">{{ import_monitor.trigger or 'manual' }}</strong></div>
+              </div>
+              <p class="muted" id="monitor-message">{{ import_monitor.message }}</p>
+              <p class="muted" id="monitor-current-file">{{ import_monitor.current_file or 'No active file.' }}</p>
+              <p class="muted" id="monitor-started">Started: {{ import_monitor.started_at or 'Not running' }}</p>
+              <p class="muted" id="monitor-completed">Completed: {{ import_monitor.completed_at or 'Not completed' }}</p>
+              <p class="monitor-error" id="monitor-last-error" {% if not import_monitor.last_error %}hidden{% endif %}>{{ import_monitor.last_error }}</p>
+
+              <div class="status-grid monitor-grid secondary-grid">
+                <div><span>Supported files</span><strong id="monitor-total-supported">{{ import_monitor.total_supported_files or 0 }}</strong></div>
+                <div><span>Nest files</span><strong id="monitor-nest-files">{{ import_monitor.nest_files or 0 }}</strong></div>
+                <div><span>DAT files</span><strong id="monitor-dat-files">{{ import_monitor.dat_files or 0 }}</strong></div>
+                <div><span>DAT groups</span><strong id="monitor-dat-groups">{{ import_monitor.dat_groups or 0 }}</strong></div>
+                <div><span>Duplicate DATs</span><strong id="monitor-duplicate-dats">{{ import_monitor.duplicate_dat_files or 0 }}</strong></div>
+                <div><span>Older than 6 months</span><strong id="monitor-filtered-old-files">{{ import_monitor.filtered_old_files or 0 }}</strong></div>
+                <div><span>Folders scanned</span><strong id="monitor-scanned-roots">{{ import_monitor.scanned_roots or 0 }} / {{ import_monitor.total_roots or 0 }}</strong></div>
+                <div><span>Found while scanning</span><strong id="monitor-discovered-files">{{ import_monitor.discovered_supported_files or 0 }}</strong></div>
+              </div>
+            </section>
+
+            <form method="post" action="{{ url_for('admin_clear_parsed_data') }}" class="admin-action-card">
+              <h3>Clear Parsed Data</h3>
+              <p class="muted">Remove parsed .DAT data, nest data, processed-file tracking, missed rows, and saved scan state so you can start fresh.</p>
+              <button type="submit" class="secondary danger">Clear All Parsed Data</button>
+            </form>
+
+            <section class="admin-action-card status-card">
+              <h3>Last import</h3>
+              <div class="status-grid">
+                <div><span>Status</span><strong>{{ last_import.status or 'idle' }}</strong></div>
+                <div><span>Trigger</span><strong>{{ last_import.trigger or 'manual' }}</strong></div>
+                <div><span>Processed</span><strong>{{ last_import.processed or 0 }}</strong></div>
+                <div><span>Skipped</span><strong>{{ last_import.skipped or 0 }}</strong></div>
+              </div>
+              <p class="muted">Started: {{ last_import.started_at or 'Not run yet' }}</p>
+              <p class="muted">Completed: {{ last_import.completed_at or 'Not run yet' }}</p>
+              <p>{{ last_import.message }}</p>
+
+              {% if last_import.active_paths %}
+              <div class="source-summary-block">
+                <h4>Active folders</h4>
+                <ul class="source-summary-list">
+                  {% for path in last_import.active_paths %}
+                  <li>{{ path }}</li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+
+              {% if last_import.missing_paths %}
+              <div class="source-summary-block">
+                <h4>Missing folders</h4>
+                <ul class="source-summary-list">
+                  {% for path in last_import.missing_paths %}
+                  <li>{{ path }}</li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+            </section>
+
+            <section class="admin-action-card status-card">
+              <h3>Last correction run</h3>
+              <div class="status-grid">
+                <div><span>Status</span><strong>{{ settings.last_correction.status or 'idle' }}</strong></div>
+                <div><span>Trigger</span><strong>{{ settings.last_correction.trigger or 'manual' }}</strong></div>
+                <div><span>Processed</span><strong>{{ settings.last_correction.processed or 0 }}</strong></div>
+                <div><span>Skipped</span><strong>{{ settings.last_correction.skipped or 0 }}</strong></div>
+              </div>
+              <p class="muted">Started: {{ settings.last_correction.started_at or 'Not run yet' }}</p>
+              <p class="muted">Completed: {{ settings.last_correction.completed_at or 'Not run yet' }}</p>
+              <p>{{ settings.last_correction.message }}</p>
+            </section>
+          </div>
+        </article>
+      </section>
+    </main>
+    <script>
+      const statusUrl = "{{ url_for('api_admin_import_status') }}";
+      const nodes = {
+        statusPill: document.getElementById('monitor-status-pill'),
+        phase: document.getElementById('monitor-phase'),
+        progressBar: document.getElementById('monitor-progress-bar'),
+        progressText: document.getElementById('monitor-progress-text'),
+        stepText: document.getElementById('monitor-step-text'),
+        processed: document.getElementById('monitor-processed'),
+        skipped: document.getElementById('monitor-skipped'),
+        errors: document.getElementById('monitor-errors'),
+        trigger: document.getElementById('monitor-trigger'),
+        message: document.getElementById('monitor-message'),
+        currentFile: document.getElementById('monitor-current-file'),
+        started: document.getElementById('monitor-started'),
+        completed: document.getElementById('monitor-completed'),
+        lastError: document.getElementById('monitor-last-error'),
+        totalSupported: document.getElementById('monitor-total-supported'),
+        nestFiles: document.getElementById('monitor-nest-files'),
+        datFiles: document.getElementById('monitor-dat-files'),
+        datGroups: document.getElementById('monitor-dat-groups'),
+        duplicateDats: document.getElementById('monitor-duplicate-dats'),
+        filteredOldFiles: document.getElementById('monitor-filtered-old-files'),
+        scannedRoots: document.getElementById('monitor-scanned-roots'),
+        discoveredFiles: document.getElementById('monitor-discovered-files')
+      };
+
+      function setText(node, value) {
+        if (node) {
+          node.textContent = value;
+        }
+      }
+
+      function renderMonitor(monitor) {
+        const status = monitor.status || 'idle';
+        setText(nodes.statusPill, status);
+        nodes.statusPill.classList.remove('scanned', 'missed');
+        if (status === 'success') {
+          nodes.statusPill.classList.add('scanned');
+        } else if (status === 'error') {
+          nodes.statusPill.classList.add('missed');
+        }
+
+        const percent = monitor.progress_percent || 0;
+        setText(nodes.phase, monitor.phase || 'Idle');
+        setText(nodes.progressText, `${percent}%`);
+        setText(nodes.stepText, `${monitor.current_step || 0} / ${monitor.total_steps || 0}`);
+        setText(nodes.processed, String(monitor.processed || 0));
+        setText(nodes.skipped, String(monitor.skipped || 0));
+        setText(nodes.errors, String(monitor.errors || 0));
+        setText(nodes.trigger, monitor.trigger || 'manual');
+        setText(nodes.message, monitor.message || 'No import running.');
+        setText(nodes.currentFile, monitor.current_file || 'No active file.');
+        setText(nodes.started, `Started: ${monitor.started_at || 'Not running'}`);
+        setText(nodes.completed, `Completed: ${monitor.completed_at || 'Not completed'}`);
+        setText(nodes.totalSupported, String(monitor.total_supported_files || 0));
+        setText(nodes.nestFiles, String(monitor.nest_files || 0));
+        setText(nodes.datFiles, String(monitor.dat_files || 0));
+        setText(nodes.datGroups, String(monitor.dat_groups || 0));
+        setText(nodes.duplicateDats, String(monitor.duplicate_dat_files || 0));
+        setText(nodes.filteredOldFiles, String(monitor.filtered_old_files || 0));
+        setText(nodes.scannedRoots, `${monitor.scanned_roots || 0} / ${monitor.total_roots || 0}`);
+        setText(nodes.discoveredFiles, String(monitor.discovered_supported_files || 0));
+        if (nodes.progressBar) {
+          nodes.progressBar.style.width = `${percent}%`;
+        }
+        if (nodes.lastError) {
+          const errorText = monitor.last_error || '';
+          nodes.lastError.textContent = errorText;
+          nodes.lastError.hidden = !errorText;
+        }
+      }
+
+      async function pollMonitor() {
+        try {
+          const response = await fetch(statusUrl, { headers: { 'X-Requested-With': 'fetch' } });
+          if (!response.ok) {
+            return;
+          }
+          const payload = await response.json();
+          renderMonitor(payload.import_monitor || {});
+        } catch (_error) {
+        }
+      }
+
+      pollMonitor();
+      window.setInterval(pollMonitor, 2000);
+    </script>
+  </body>
+</html>

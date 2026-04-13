@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run NEWTRACKER UI",
+			"type": "shell",
+			"command": "c:/Project p/NEWTRACKER/.venv/Scripts/python.exe",
+			"args": [
+				"Application/scripts/run_clean_ui.py"
+			],
+			"isBackground": true
+		}
+	]
+}

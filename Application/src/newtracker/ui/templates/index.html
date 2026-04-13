@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Part Scanner</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="top-panel">
+        <div class="panel-title-row">
+          <div class="title-block">
+            <h1>Part Scanner</h1>
+            <p class="muted">Machine -> User -> Location -> Nest Data -> Parts</p>
+          </div>
+          <div class="header-actions">
+            <a href="{{ url_for('completed_list') }}" class="button-link">View List</a>
+            <a href="{{ url_for('admin_home') }}" class="button-link">Admin</a>
+            <form method="post" action="{{ url_for('reset') }}">
+              <button type="submit" class="secondary">Reset</button>
+            </form>
+            <form method="post" action="{{ url_for('clear_session_data') }}">
+              <button type="submit" class="secondary">Clear Session Data</button>
+            </form>
+            <form method="post" action="{{ url_for('clear_completed') }}">
+              <button type="submit" class="secondary danger">Clear List</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="nav-tabs">
+          <a href="{{ url_for('home') }}" class="nav-tab active">Main Scanner</a>
+          <a href="{{ url_for('formed_home') }}" class="nav-tab">Formed Scanner</a>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <div class="flash-stack">
+              {% for category, message in messages %}
+                <div class="flash {{ category }}">{{ message }}</div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+
+        <div class="controls-layout">
+          <div class="control-column">
+            <form method="post" action="{{ url_for('scan_field', field_name='machine_code') }}" class="scan-box compact {% if state.active_field == 'machine_code' %}active{% endif %}">
+              <label>MACHINE</label>
+              <input name="value" value="{{ state.machine_code }}" placeholder="Type or scan machine" {% if state.active_field == 'machine_code' and not review_mode %}autofocus{% endif %} {% if review_mode %}disabled{% endif %}>
+            </form>
+
+            <form method="post" action="{{ url_for('scan_field', field_name='user_code') }}" class="scan-box compact {% if state.active_field == 'user_code' %}active{% endif %}">
+              <label>USER</label>
+              <input name="value" value="{{ state.user_code }}" {% if state.active_field == 'user_code' and not review_mode %}autofocus{% endif %} {% if review_mode %}disabled{% endif %}>
+            </form>
+
+            <form method="post" action="{{ url_for('scan_field', field_name='location_code') }}" class="scan-box compact {% if state.active_field == 'location_code' %}active{% endif %}">
+              <label>LOCATION</label>
+              <input name="value" value="{{ state.location_code }}" {% if state.active_field == 'location_code' and not review_mode %}autofocus{% endif %} {% if review_mode %}disabled{% endif %}>
+            </form>
+
+            <form method="post" action="{{ url_for('scan_field', field_name='nest_data') }}" class="scan-box compact {% if state.active_field == 'nest_data' %}active{% endif %}">
+              <label>NEST DATA</label>
+              <input name="value" value="{{ state.nest_data }}" {% if state.active_field == 'nest_data' and not review_mode %}autofocus{% endif %} {% if review_mode %}disabled{% endif %}>
+            </form>
+          </div>
+
+          <div class="status-column">
+            <div class="message-card hero-message {{ state.message_level or 'info' }}">{{ state.message }}</div>
+
+            <form method="post" action="{{ url_for('scan_field', field_name='part_scan') }}" class="scan-box part-scan-box {% if state.active_field == 'part_scan' %}active{% endif %}">
+              <label>PART SCAN</label>
+              <input name="value" placeholder="Scan part barcode" {% if state.active_field == 'part_scan' and not review_mode %}autofocus{% endif %} {% if review_mode %}disabled{% endif %}>
+            </form>
+
+            <div class="summary-strip">
+              <div class="summary-card"><span>Expected</span><strong>{{ summary.expected_total }}</strong></div>
+              <div class="summary-card"><span>Scanned</span><strong>{{ summary.scanned_total }}</strong></div>
+              <div class="summary-card"><span>Remaining</span><strong>{{ summary.remaining_total }}</strong></div>
+            </div>
+
+            {% if can_complete or can_force_complete %}
+            <div class="completion-actions">
+              {% if can_complete %}
+              <form method="post" action="{{ url_for('complete_batch') }}" class="complete-form compact-action-form">
+                <button type="submit" class="complete-button compact-button">OK Send to Part Tracker</button>
+              </form>
+              {% endif %}
+              {% if can_force_complete %}
+              <form method="post" action="{{ url_for('force_complete_batch') }}" class="complete-form compact-action-form">
+                <button type="submit" class="secondary warning compact-button">Force Complete</button>
+              </form>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+      </section>
+
+      {% if review_mode %}
+      <section class="bottom-panel review-bottom-panel">
+        <article class="list-pane review-pane">
+          <div class="pane-header review-header">
+            <div>
+              <p class="eyebrow">Batch review</p>
+              <h2>Review before sending</h2>
+            </div>
+            <div class="review-counts">
+              <span>{{ review_rows|length }} scanned</span>
+              <span>{{ review_missed_rows|length }} missed</span>
+            </div>
+          </div>
+
+          <form method="post" action="{{ url_for('save_review') }}" class="review-form">
+            <input type="hidden" name="scanned_count" value="{{ review_rows|length }}">
+            <input type="hidden" name="missed_count" value="{{ review_missed_rows|length }}">
+
+            <div class="review-actions">
+              <button type="submit" formaction="{{ url_for('edit_review') }}" class="secondary">Edit</button>
+              <button type="submit" formaction="{{ url_for('add_manual_review_row') }}" class="secondary" {% if not review_edit_mode %}disabled{% endif %}>Add Manual Part</button>
+              <button type="submit" class="complete-button">Save and Send to Part Tracker</button>
+            </div>
+
+            <div class="table-wrap review-table-wrap">
+              <table class="review-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Machine</th>
+                    <th>User</th>
+                    <th>Location</th>
+                    <th>Nest Data</th>
+                    <th>Part</th>
+                    <th>Rev</th>
+                    <th>COM#</th>
+                    <th>F Flag</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in review_rows %}
+                  <tr>
+                    <td><span class="status-pill scanned">Scanned</span></td>
+                    <td><input name="scanned__{{ loop.index0 }}__machine" value="{{ row.machine }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="scanned__{{ loop.index0 }}__user" value="{{ row.user }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="scanned__{{ loop.index0 }}__location" value="{{ row.location }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="scanned__{{ loop.index0 }}__nest_data" value="{{ row.nest_data }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="scanned__{{ loop.index0 }}__part_number" value="{{ row.part_number }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="scanned__{{ loop.index0 }}__part_revision" value="{{ row.part_revision }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="scanned__{{ loop.index0 }}__com_number" value="{{ row.com_number }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="scanned__{{ loop.index0 }}__f_flag" value="{{ 'Y' if row.f_flag else 'N' }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                  </tr>
+                  {% endfor %}
+                  {% for row in review_missed_rows %}
+                  <tr>
+                    <td><span class="status-pill missed">Missed</span></td>
+                    <td><input name="missed__{{ loop.index0 }}__machine" value="{{ row.machine }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="missed__{{ loop.index0 }}__user" value="{{ row.user }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="missed__{{ loop.index0 }}__location" value="{{ row.location }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="missed__{{ loop.index0 }}__nest_data" value="{{ row.nest_data }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="missed__{{ loop.index0 }}__part_number" value="{{ row.part_number }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="missed__{{ loop.index0 }}__part_revision" value="{{ row.part_revision }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="missed__{{ loop.index0 }}__com_number" value="{{ row.com_number }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                    <td><input name="missed__{{ loop.index0 }}__f_flag" value="{{ 'Y' if row.f_flag else 'N' }}" {% if not review_edit_mode %}readonly{% endif %}></td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </form>
+        </article>
+      </section>
+      {% else %}
+      <section class="bottom-panel">
+        <article class="list-pane left-pane">
+          <div class="pane-header">
+            <div>
+              <p class="eyebrow">Expected part scans</p>
+              <h2>Still to scan</h2>
+            </div>
+          </div>
+          {% if expected_parts %}
+            <div class="part-list">
+              {% for part in expected_parts %}
+                <div class="part-card">
+                  <span class="part-line"><strong>{{ part.part_number }}</strong> · Rev {{ part.part_revision }}{% if part.com_number %} · COM {{ part.com_number }}{% endif %} · Scan {{ part.sequence }}</span>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="empty-state">No expected parts loaded yet.</p>
+          {% endif %}
+        </article>
+
+        <article class="list-pane right-pane">
+          <div class="pane-header">
+            <div>
+              <p class="eyebrow">Scanned parts</p>
+              <h2>Completed scans</h2>
+            </div>
+          </div>
+          {% if scanned_parts %}
+            <div class="part-list">
+              {% for part in scanned_parts %}
+                <div class="part-card scanned">
+                  <span class="part-line"><strong>{{ part.part_number }}</strong></span>
+                  <span class="part-meta">Machine {{ state.machine_code or '-' }} · User {{ state.user_code or '-' }} · Location {{ state.location_code or '-' }}</span>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="empty-state">Scanned parts will show up here.</p>
+          {% endif %}
+        </article>
+      </section>
+      {% endif %}
+    </main>
+
+    <script>
+      document.querySelectorAll('.scan-box input:not([disabled])').forEach((input) => {
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.currentTarget.form.submit();
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Admin Login</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
+  </head>
+  <body>
+    <main class="page-shell admin-login-shell">
+      <section class="top-panel admin-login-panel">
+        <div class="panel-title-row">
+          <div class="title-block">
+            <h1>Admin Login</h1>
+            <p class="muted">Use the local admin login to manage source folders and import settings.</p>
+          </div>
+          <div class="header-actions">
+            <a href="{{ url_for('home') }}" class="button-link">Back to Scanner</a>
+          </div>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <div class="flash-stack">
+              {% for category, message in messages %}
+                <div class="flash {{ category }}">{{ message }}</div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+
+        <form method="post" action="{{ url_for('admin_login_submit') }}" class="admin-login-card">
+          <label>
+            <span>Username</span>
+            <input name="username" value="admin" autocomplete="username" autofocus>
+          </label>
+          <label>
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="current-password">
+          </label>
+          <button type="submit">Log In</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>
