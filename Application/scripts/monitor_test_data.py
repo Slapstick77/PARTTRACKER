@@ -1,11 +1,5 @@
 from __future__ import annotations
 
-"""Legacy standalone watcher.
-
-The Flask admin auto-import now runs only inside the UI app process.
-This script is not used by the app runtime.
-"""
-
 import sys
 import time
 from pathlib import Path

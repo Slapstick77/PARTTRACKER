@@ -6,10 +6,10 @@ import time
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from .db import APP_ROOT, get_connection
-from .importer import clear_scan_cache, correction_import_paths, import_paths
+from .importer import clear_scan_cache, import_paths
 from .schema import create_schema
 from .ui_state import UiStateStore
 
@@ -90,6 +90,7 @@ class AdminSettingsStore:
             "dat_groups": 0,
             "duplicate_dat_files": 0,
             "filtered_old_files": 0,
+            "unstable_recent_files": 0,
             "scanned_roots": 0,
             "total_roots": 0,
             "discovered_supported_files": 0,
@@ -97,6 +98,19 @@ class AdminSettingsStore:
             "missing_paths": [],
             "last_error": "",
         }
+
+    @staticmethod
+    def _compute_progress_percent(monitor: dict[str, Any]) -> int:
+        total_steps = int(monitor.get("total_steps") or 0)
+        current_step = int(monitor.get("current_step") or 0)
+        total_roots = int(monitor.get("total_roots") or 0)
+        scanned_roots = int(monitor.get("scanned_roots") or 0)
+        phase = str(monitor.get("phase") or "")
+        if total_steps > 0:
+            return min(100, max(15, int(15 + ((current_step / total_steps) * 85))))
+        if phase == "Scanning folders" and total_roots > 0:
+            return min(90, max(5, int((scanned_roots / total_roots) * 100)))
+        return 0 if monitor.get("status") == "idle" else int(monitor.get("progress_percent") or 0)
 
     @staticmethod
     def _default_run_result(message: str) -> dict[str, Any]:
@@ -115,10 +129,8 @@ class AdminSettingsStore:
     def _default_state(self) -> dict[str, Any]:
         return {
             "poll_interval_minutes": 0,
-            "correction_schedule_time": "",
             "folders": {key: dict(value) for key, value in DEFAULT_SOURCE_FOLDERS.items()},
             "last_import": self._default_run_result("No import has been run yet."),
-            "last_correction": self._default_run_result("No correction run has been run yet."),
         }
 
     def read(self) -> dict[str, Any]:
@@ -136,10 +148,8 @@ class AdminSettingsStore:
         with _SETTINGS_LOCK:
             persisted = {
                 "poll_interval_minutes": state.get("poll_interval_minutes", 0),
-                "correction_schedule_time": state.get("correction_schedule_time", ""),
                 "folders": state.get("folders", {}),
                 "last_import": state.get("last_import", self._default_state()["last_import"]),
-                "last_correction": state.get("last_correction", self._default_state()["last_correction"]),
             }
             self.path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
 
@@ -204,14 +214,6 @@ class AdminSettingsStore:
 
         state["poll_interval_minutes"] = poll_interval
 
-        correction_schedule_time = str(form.get("correction_schedule_time", "")).strip()
-        if correction_schedule_time:
-            try:
-                datetime.strptime(correction_schedule_time, "%H:%M")
-            except ValueError as exc:
-                raise AdminSettingsError("Correction run time must use 24-hour HH:MM format.") from exc
-        state["correction_schedule_time"] = correction_schedule_time
-
         for folder_key in state["folders"]:
             mode = str(form.get(f"source_mode_{folder_key}", "test")).strip().lower()
             production_path = str(form.get(f"production_path_{folder_key}", "")).strip()
@@ -226,13 +228,7 @@ class AdminSettingsStore:
         with _SETTINGS_LOCK:
             monitor = dict(_IMPORT_MONITOR_STATE or self._default_import_monitor())
             monitor.update(updates)
-            total_steps = int(monitor.get("total_steps") or 0)
-            current_step = int(monitor.get("current_step") or 0)
-            if total_steps > 0:
-                progress_percent = min(100, max(0, int((current_step / total_steps) * 100)))
-            else:
-                progress_percent = 0 if monitor.get("status") == "idle" else int(monitor.get("progress_percent") or 0)
-            monitor["progress_percent"] = progress_percent
+            monitor["progress_percent"] = self._compute_progress_percent(monitor)
             _IMPORT_MONITOR_STATE = monitor
             return dict(monitor)
 
@@ -258,6 +254,7 @@ class AdminSettingsStore:
             dat_groups=0,
             duplicate_dat_files=0,
             filtered_old_files=0,
+            unstable_recent_files=0,
             scanned_roots=0,
             total_roots=len(active_paths),
             discovered_supported_files=0,
@@ -290,10 +287,7 @@ class AdminSettingsStore:
             "active_paths": active_paths,
             "missing_paths": missing_paths,
         }
-        if not trigger.startswith("correction"):
-            state["last_import"] = result
-        if trigger.startswith("correction"):
-            state["last_correction"] = dict(result)
+        state["last_import"] = result
         self.write(state)
         return state
 
@@ -309,7 +303,10 @@ class AdminSettingsStore:
     def import_monitor(self) -> dict[str, Any]:
         global _IMPORT_MONITOR_STATE
         with _SETTINGS_LOCK:
-            return dict(_IMPORT_MONITOR_STATE or self._default_import_monitor())
+            monitor = dict(_IMPORT_MONITOR_STATE or self._default_import_monitor())
+            monitor["progress_percent"] = self._compute_progress_percent(monitor)
+            _IMPORT_MONITOR_STATE = monitor
+            return dict(monitor)
 
 
 def _progress_updater(store: AdminSettingsStore, trigger: str, active_path_strings: list[str], missing_paths: list[str]):
@@ -333,6 +330,7 @@ def _progress_updater(store: AdminSettingsStore, trigger: str, active_path_strin
             dat_groups=snapshot.get("dat_groups", 0),
             duplicate_dat_files=snapshot.get("duplicate_dat_files", 0),
             filtered_old_files=snapshot.get("filtered_old_files", 0),
+            unstable_recent_files=snapshot.get("unstable_recent_files", current.get("unstable_recent_files", 0)),
             scanned_roots=snapshot.get("scanned_roots", current.get("scanned_roots", 0)),
             total_roots=snapshot.get("total_roots", current.get("total_roots", len(active_path_strings))),
             discovered_supported_files=snapshot.get("discovered_supported_files", current.get("discovered_supported_files", 0)),
@@ -361,7 +359,7 @@ def _normal_import_changed_since() -> datetime | None:
     return latest_dt - timedelta(minutes=5)
 
 
-def run_import_cycle(store: AdminSettingsStore, *, trigger: str, correction_run: bool = False) -> dict[str, Any]:
+def run_import_cycle(store: AdminSettingsStore, *, trigger: str) -> dict[str, Any]:
     started_at = datetime.now().isoformat(timespec="seconds")
     with _IMPORT_LOCK:
         state = store.read()
@@ -389,17 +387,11 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str, correction_run:
             raise AdminSettingsError(message)
 
         try:
-            if correction_run:
-                counts = correction_import_paths(
-                    active_paths,
-                    progress_callback=_progress_updater(store, trigger, active_path_strings, missing_paths),
-                )
-            else:
-                counts = import_paths(
-                    active_paths,
-                    changed_since=_normal_import_changed_since(),
-                    progress_callback=_progress_updater(store, trigger, active_path_strings, missing_paths),
-                )
+            counts = import_paths(
+                active_paths,
+                changed_since=_normal_import_changed_since(),
+                progress_callback=_progress_updater(store, trigger, active_path_strings, missing_paths),
+            )
         except Exception as exc:
             trace_text = traceback.format_exc()
             IMPORT_ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -421,7 +413,22 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str, correction_run:
             )
             raise
 
-        message = f"Imported {counts['processed']} files and skipped {counts['skipped']} unchanged files."
+        skipped_parts: list[str] = []
+        if counts.get("unchanged_skipped"):
+            skipped_parts.append(f"{counts['unchanged_skipped']} unchanged")
+        if counts.get("duplicate_candidate_skipped"):
+            skipped_parts.append(f"{counts['duplicate_candidate_skipped']} duplicate DAT candidates")
+        if counts.get("missing_skipped"):
+            skipped_parts.append(f"{counts['missing_skipped']} missing or unavailable")
+
+        if skipped_parts:
+            message = f"Imported {counts['processed']} files and skipped {counts['skipped']} files ({'; '.join(skipped_parts)})."
+        else:
+            message = f"Imported {counts['processed']} files."
+        if counts.get("unstable_recent_files"):
+            message = (
+                f"{message} Deferred {counts['unstable_recent_files']} recently modified files until they remain unchanged for 2 minutes."
+            )
         if missing_paths:
             message = f"{message} Missing folders: {'; '.join(missing_paths)}"
 
@@ -441,6 +448,7 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str, correction_run:
             dat_groups=counts["dat_groups"],
             duplicate_dat_files=counts["duplicate_dat_files"],
             filtered_old_files=counts["filtered_old_files"],
+            unstable_recent_files=counts["unstable_recent_files"],
             scanned_roots=len(active_path_strings),
             total_roots=len(active_path_strings),
             discovered_supported_files=counts["total_supported_files"],
@@ -459,18 +467,16 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str, correction_run:
         return updated["last_import"]
 
 
-def start_import_job(store: AdminSettingsStore, *, trigger: str, correction_run: bool | None = None) -> bool:
+def start_import_job(store: AdminSettingsStore, *, trigger: str) -> bool:
     global _JOB_THREAD
     with _MONITOR_LOCK:
         if _JOB_THREAD is not None and _JOB_THREAD.is_alive():
             return False
 
-        resolved_correction_run = trigger.startswith("correction") if correction_run is None else correction_run
-
         def _runner() -> None:
             global _JOB_THREAD
             try:
-                run_import_cycle(store, trigger=trigger, correction_run=resolved_correction_run)
+                run_import_cycle(store, trigger=trigger)
             except Exception:
                 pass
             finally:
@@ -497,6 +503,10 @@ def clear_parsed_data() -> int:
             DELETE FROM nest_parts;
             DELETE FROM program_nests;
             DELETE FROM part_attributes;
+            DELETE FROM job_orders;
+            DELETE FROM job_labels;
+            DELETE FROM job_parts;
+            DELETE FROM job_folders;
             DELETE FROM missed_scans;
             DELETE FROM processed_files;
             DELETE FROM sqlite_sequence WHERE name IN (
@@ -510,6 +520,10 @@ def clear_parsed_data() -> int:
                 'nest_parts',
                 'program_nests',
                 'part_attributes',
+                'job_orders',
+                'job_labels',
+                'job_parts',
+                'job_folders',
                 'missed_scans',
                 'processed_files'
             );
@@ -518,7 +532,7 @@ def clear_parsed_data() -> int:
         connection.commit()
 
     clear_scan_cache()
-    ui_state = UiStateStore()
+    ui_state = cast(Any, UiStateStore())
     ui_state.clear_runtime_data()
     return 1
 
@@ -539,40 +553,12 @@ def _is_auto_import_due(state: dict[str, Any]) -> bool:
     return datetime.now() >= last_run + timedelta(minutes=interval_minutes)
 
 
-def _is_correction_due(state: dict[str, Any]) -> bool:
-    correction_time = str(state.get("correction_schedule_time") or "").strip()
-    if not correction_time:
-        return False
-
-    try:
-        scheduled = datetime.strptime(correction_time, "%H:%M").time()
-    except ValueError:
-        return False
-
-    now = datetime.now()
-    scheduled_today = now.replace(hour=scheduled.hour, minute=scheduled.minute, second=0, microsecond=0)
-    if now < scheduled_today:
-        return False
-
-    completed_at = str(state.get("last_correction", {}).get("completed_at", "")).strip()
-    if not completed_at:
-        return True
-
-    try:
-        last_run = datetime.fromisoformat(completed_at)
-    except ValueError:
-        return True
-    return last_run.date() < now.date()
-
-
 def _monitor_loop() -> None:
     store = AdminSettingsStore()
     while True:
         try:
             state = store.read()
-            if _is_correction_due(state):
-                start_import_job(store, trigger="correction-auto", correction_run=True)
-            elif _is_auto_import_due(state):
+            if _is_auto_import_due(state):
                 start_import_job(store, trigger="auto")
         except Exception:
             pass

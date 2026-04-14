@@ -87,6 +87,69 @@ def create_schema(connection: sqlite3.Connection) -> None:
             UNIQUE (com_number_key, part_number, rev_level_key, build_date_key)
         );
 
+        CREATE TABLE IF NOT EXISTS job_folders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            folder_name TEXT NOT NULL,
+            folder_path TEXT NOT NULL UNIQUE,
+            com_number TEXT,
+            build_date_code TEXT,
+            project_name TEXT,
+            source_root TEXT,
+            last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS job_parts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_folder_id INTEGER NOT NULL,
+            source_type TEXT NOT NULL,
+            part_number TEXT NOT NULL,
+            revision TEXT,
+            revision_key TEXT NOT NULL DEFAULT '',
+            build_date_code TEXT,
+            order_number_raw TEXT,
+            process_code TEXT,
+            routing TEXT,
+            nested_on TEXT,
+            quantity INTEGER,
+            source_file_path TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_folder_id) REFERENCES job_folders(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS job_labels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_folder_id INTEGER NOT NULL,
+            part_number TEXT NOT NULL,
+            barcode TEXT,
+            assembly TEXT,
+            unit_id TEXT,
+            build_day TEXT,
+            nest_name TEXT,
+            material TEXT,
+            routing TEXT,
+            quantity INTEGER,
+            source_file_path TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_folder_id) REFERENCES job_folders(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS job_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_folder_id INTEGER NOT NULL,
+            source_type TEXT NOT NULL,
+            part_number TEXT,
+            material TEXT,
+            profile TEXT,
+            order_group TEXT,
+            raw_identifier TEXT,
+            quantity INTEGER,
+            length REAL,
+            source_file_path TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_folder_id) REFERENCES job_folders(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS resolved_nest_parts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nest_id INTEGER NOT NULL,
@@ -106,11 +169,17 @@ def create_schema(connection: sqlite3.Connection) -> None:
             match_candidate_count INTEGER NOT NULL DEFAULT 0,
             match_build_dates TEXT,
             match_com_numbers TEXT,
+            matched_job_folder_id INTEGER,
+            matched_job_part_id INTEGER,
+            job_match_score INTEGER NOT NULL DEFAULT 0,
+            evidence_summary TEXT,
             matched_part_attribute_id INTEGER,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (nest_id) REFERENCES program_nests(id) ON DELETE CASCADE,
             FOREIGN KEY (nest_part_id) REFERENCES nest_parts(id) ON DELETE CASCADE,
+            FOREIGN KEY (matched_job_folder_id) REFERENCES job_folders(id) ON DELETE SET NULL,
+            FOREIGN KEY (matched_job_part_id) REFERENCES job_parts(id) ON DELETE SET NULL,
             FOREIGN KEY (matched_part_attribute_id) REFERENCES part_attributes(id) ON DELETE SET NULL
         );
 
@@ -193,21 +262,6 @@ def create_schema(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (forming_batch_id) REFERENCES forming_batches(id) ON DELETE SET NULL
         );
 
-        CREATE TABLE IF NOT EXISTS missed_scans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            review_completed_at TEXT NOT NULL,
-            machine_code TEXT NOT NULL DEFAULT '',
-            user_code TEXT NOT NULL DEFAULT '',
-            location_code TEXT NOT NULL DEFAULT '',
-            nest_data TEXT NOT NULL DEFAULT '',
-            part_number TEXT NOT NULL,
-            part_revision TEXT,
-            com_number TEXT,
-            requires_forming INTEGER NOT NULL DEFAULT 0,
-            reason TEXT NOT NULL DEFAULT 'force_complete',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-
         CREATE TABLE IF NOT EXISTS processed_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_path TEXT NOT NULL UNIQUE,
@@ -227,14 +281,23 @@ def create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_part_attributes_lookup
             ON part_attributes(part_number, rev_level, build_date, com_number);
 
+        CREATE INDEX IF NOT EXISTS idx_job_folders_lookup
+            ON job_folders(com_number, build_date_code);
+
+        CREATE INDEX IF NOT EXISTS idx_job_parts_lookup
+            ON job_parts(part_number, revision_key, build_date_code, order_number_raw);
+
+        CREATE INDEX IF NOT EXISTS idx_job_labels_lookup
+            ON job_labels(part_number, unit_id, build_day);
+
+        CREATE INDEX IF NOT EXISTS idx_job_orders_lookup
+            ON job_orders(part_number, source_type, order_group);
+
         CREATE INDEX IF NOT EXISTS idx_forming_batch_items_lookup
             ON forming_batch_items(part_number, part_revision);
 
         CREATE INDEX IF NOT EXISTS idx_processed_files_status
             ON processed_files(status, file_type);
-
-        CREATE INDEX IF NOT EXISTS idx_missed_scans_lookup
-            ON missed_scans(review_completed_at, nest_data, part_number);
         """
     )
 
@@ -296,11 +359,30 @@ def create_schema(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE resolved_nest_parts ADD COLUMN match_com_numbers TEXT"
         )
+    if "matched_job_folder_id" not in existing_resolved_columns:
+        connection.execute(
+            "ALTER TABLE resolved_nest_parts ADD COLUMN matched_job_folder_id INTEGER"
+        )
+    if "matched_job_part_id" not in existing_resolved_columns:
+        connection.execute(
+            "ALTER TABLE resolved_nest_parts ADD COLUMN matched_job_part_id INTEGER"
+        )
+    if "job_match_score" not in existing_resolved_columns:
+        connection.execute(
+            "ALTER TABLE resolved_nest_parts ADD COLUMN job_match_score INTEGER NOT NULL DEFAULT 0"
+        )
+    if "evidence_summary" not in existing_resolved_columns:
+        connection.execute(
+            "ALTER TABLE resolved_nest_parts ADD COLUMN evidence_summary TEXT"
+        )
 
     connection.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_part_attributes_resolve_lookup
             ON part_attributes(part_number, normalized_rev_key, build_date);
+
+        CREATE INDEX IF NOT EXISTS idx_job_parts_resolve_lookup
+            ON job_parts(part_number, revision_key, job_folder_id);
 
         CREATE INDEX IF NOT EXISTS idx_resolved_nest_parts_barcode
             ON resolved_nest_parts(barcode_filename, part_number);

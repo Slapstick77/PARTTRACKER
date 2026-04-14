@@ -12,30 +12,20 @@
         <div class="panel-title-row">
           <div class="title-block">
             <h1>Completed Scan List</h1>
-            <p class="muted">Sent part-tracker rows and force-complete missed scans.</p>
+            <p class="muted">Archived completed parts for testing review.</p>
           </div>
           <div class="header-actions">
             <a href="{{ url_for('home') }}" class="button-link">Back to Scanner</a>
             <a href="{{ url_for('admin_home') }}" class="button-link">Admin</a>
             <form method="post" action="{{ url_for('clear_completed') }}">
-              <button type="submit" class="secondary danger">Clear Sent Rows</button>
-            </form>
-            <form method="post" action="{{ url_for('clear_missed') }}">
-              <button type="submit" class="secondary danger">Clear Missed Rows</button>
+              <button type="submit" class="secondary danger">Clear List</button>
             </form>
           </div>
         </div>
       </section>
 
       <section class="bottom-panel list-bottom-panel">
-        <article class="list-pane list-full-pane stacked-list-pane">
-          <div class="list-section">
-            <div class="pane-header">
-              <div>
-                <p class="eyebrow">Sent rows</p>
-                <h2>Part tracker archive</h2>
-              </div>
-            </div>
+        <article class="list-pane list-full-pane">
           {% if rows %}
           <div class="table-wrap">
             <table>
@@ -70,56 +60,8 @@
             </table>
           </div>
           {% else %}
-            <p class="empty-state">No sent rows archived yet.</p>
+            <p class="empty-state">No completed rows archived yet.</p>
           {% endif %}
-          </div>
-
-          <div class="list-section">
-            <div class="pane-header">
-              <div>
-                <p class="eyebrow">Missed scans</p>
-                <h2>Force-complete archive</h2>
-              </div>
-            </div>
-            {% if missed_rows %}
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Review Time</th>
-                    <th>Machine</th>
-                    <th>User</th>
-                    <th>Location</th>
-                    <th>Nest Data</th>
-                    <th>Part</th>
-                    <th>Rev</th>
-                    <th>COM#</th>
-                    <th>F Flag</th>
-                    <th>Reason</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {% for row in missed_rows %}
-                  <tr>
-                    <td>{{ row.review_completed_at }}</td>
-                    <td>{{ row.machine_code }}</td>
-                    <td>{{ row.user_code }}</td>
-                    <td>{{ row.location_code }}</td>
-                    <td>{{ row.nest_data }}</td>
-                    <td>{{ row.part_number }}</td>
-                    <td>{{ row.part_revision or '—' }}</td>
-                    <td>{{ row.com_number or '—' }}</td>
-                    <td>{{ 'Y' if row.requires_forming else 'N' }}</td>
-                    <td>{{ row.reason }}</td>
-                  </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-            {% else %}
-            <p class="empty-state">No missed rows archived yet.</p>
-            {% endif %}
-          </div>
         </article>
       </section>
     </main>

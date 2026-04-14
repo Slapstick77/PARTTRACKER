@@ -81,10 +81,11 @@
             <section class="folder-card">
               <div class="folder-card-header">
                 <div>
-                  <h3>Automatic check</h3>
-                  <p class="muted">The background monitor only scans .DAT files and NestComparison.csv files.</p>
+                  <h3>Automatic import</h3>
+                  <p class="muted">Automatic imports use the same unified import process as the manual run.</p>
+                  <p class="muted">That means new job files in Programming folders are included, not just .DAT files.</p>
                   <p class="muted">Amada, EMK1, and Laser scan only the selected folder. Programming folders still scan subfolders.</p>
-                  <p class="muted">Supported files older than 6 months are skipped automatically.</p>
+                  <p class="muted">Files older than 6 months are skipped, and files changed within the last 2 minutes are deferred until they are stable enough to import safely.</p>
                 </div>
               </div>
 
@@ -92,13 +93,7 @@
                 <span>Minutes between checks</span>
                 <input name="poll_interval_minutes" type="number" min="0" step="1" value="{{ settings.poll_interval_minutes }}">
               </label>
-              <p class="muted helper-text">Use 0 to disable automatic checks.</p>
-
-              <label class="settings-field short-field">
-                <span>Daily correction run time</span>
-                <input name="correction_schedule_time" type="time" value="{{ settings.correction_schedule_time or '' }}">
-              </label>
-              <p class="muted helper-text">Leave blank to disable the daily correction run.</p>
+              <p class="muted helper-text">Use 0 to disable scheduled automatic imports.</p>
             </section>
 
             <button type="submit">Save Settings</button>
@@ -116,14 +111,8 @@
           <div class="admin-action-stack">
             <form method="post" action="{{ url_for('admin_import_now') }}" class="admin-action-card">
               <h3>Look For New Files</h3>
-              <p class="muted">Force a scan of the active folders, parse supported files, and update the database tables without freezing the page.</p>
+              <p class="muted">Run the single unified import. It scans the active folders, rebuilds job context from programming-folder files, parses DAT files, and refreshes resolved matches.</p>
               <button type="submit">Look For New Files</button>
-            </form>
-
-            <form method="post" action="{{ url_for('admin_correction_now') }}" class="admin-action-card">
-              <h3>Run Correction Pass</h3>
-              <p class="muted">Reevaluate existing imported DAT barcodes, apply duplicate logic again where needed, and refresh corrected resolved matches. This run is slower than a normal import.</p>
-              <button type="submit" class="secondary">Run Correction Pass</button>
             </form>
 
             <section class="admin-action-card status-card" id="import-monitor-card">
@@ -156,6 +145,7 @@
                 <div><span>DAT groups</span><strong id="monitor-dat-groups">{{ import_monitor.dat_groups or 0 }}</strong></div>
                 <div><span>Duplicate DATs</span><strong id="monitor-duplicate-dats">{{ import_monitor.duplicate_dat_files or 0 }}</strong></div>
                 <div><span>Older than 6 months</span><strong id="monitor-filtered-old-files">{{ import_monitor.filtered_old_files or 0 }}</strong></div>
+                <div><span>Recent files waiting</span><strong id="monitor-unstable-recent-files">{{ import_monitor.unstable_recent_files or 0 }}</strong></div>
                 <div><span>Folders scanned</span><strong id="monitor-scanned-roots">{{ import_monitor.scanned_roots or 0 }} / {{ import_monitor.total_roots or 0 }}</strong></div>
                 <div><span>Found while scanning</span><strong id="monitor-discovered-files">{{ import_monitor.discovered_supported_files or 0 }}</strong></div>
               </div>
@@ -170,50 +160,34 @@
             <section class="admin-action-card status-card">
               <h3>Last import</h3>
               <div class="status-grid">
-                <div><span>Status</span><strong>{{ last_import.status or 'idle' }}</strong></div>
-                <div><span>Trigger</span><strong>{{ last_import.trigger or 'manual' }}</strong></div>
-                <div><span>Processed</span><strong>{{ last_import.processed or 0 }}</strong></div>
-                <div><span>Skipped</span><strong>{{ last_import.skipped or 0 }}</strong></div>
+                <div><span>Status</span><strong id="last-import-status">{{ last_import.status or 'idle' }}</strong></div>
+                <div><span>Trigger</span><strong id="last-import-trigger">{{ last_import.trigger or 'manual' }}</strong></div>
+                <div><span>Processed</span><strong id="last-import-processed">{{ last_import.processed or 0 }}</strong></div>
+                <div><span>Skipped</span><strong id="last-import-skipped">{{ last_import.skipped or 0 }}</strong></div>
               </div>
-              <p class="muted">Started: {{ last_import.started_at or 'Not run yet' }}</p>
-              <p class="muted">Completed: {{ last_import.completed_at or 'Not run yet' }}</p>
-              <p>{{ last_import.message }}</p>
+              <p class="muted" id="last-import-started">Started: {{ last_import.started_at or 'Not run yet' }}</p>
+              <p class="muted" id="last-import-completed">Completed: {{ last_import.completed_at or 'Not run yet' }}</p>
+              <p id="last-import-message">{{ last_import.message }}</p>
 
-              {% if last_import.active_paths %}
-              <div class="source-summary-block">
+              <div class="source-summary-block" id="last-import-active-block" {% if not last_import.active_paths %}hidden{% endif %}>
                 <h4>Active folders</h4>
-                <ul class="source-summary-list">
+                <ul class="source-summary-list" id="last-import-active-paths">
                   {% for path in last_import.active_paths %}
                   <li>{{ path }}</li>
                   {% endfor %}
                 </ul>
               </div>
-              {% endif %}
 
-              {% if last_import.missing_paths %}
-              <div class="source-summary-block">
+              <div class="source-summary-block" id="last-import-missing-block" {% if not last_import.missing_paths %}hidden{% endif %}>
                 <h4>Missing folders</h4>
-                <ul class="source-summary-list">
+                <ul class="source-summary-list" id="last-import-missing-paths">
                   {% for path in last_import.missing_paths %}
                   <li>{{ path }}</li>
                   {% endfor %}
                 </ul>
               </div>
-              {% endif %}
             </section>
 
-            <section class="admin-action-card status-card">
-              <h3>Last correction run</h3>
-              <div class="status-grid">
-                <div><span>Status</span><strong>{{ settings.last_correction.status or 'idle' }}</strong></div>
-                <div><span>Trigger</span><strong>{{ settings.last_correction.trigger or 'manual' }}</strong></div>
-                <div><span>Processed</span><strong>{{ settings.last_correction.processed or 0 }}</strong></div>
-                <div><span>Skipped</span><strong>{{ settings.last_correction.skipped or 0 }}</strong></div>
-              </div>
-              <p class="muted">Started: {{ settings.last_correction.started_at or 'Not run yet' }}</p>
-              <p class="muted">Completed: {{ settings.last_correction.completed_at or 'Not run yet' }}</p>
-              <p>{{ settings.last_correction.message }}</p>
-            </section>
           </div>
         </article>
       </section>
@@ -241,8 +215,20 @@
         datGroups: document.getElementById('monitor-dat-groups'),
         duplicateDats: document.getElementById('monitor-duplicate-dats'),
         filteredOldFiles: document.getElementById('monitor-filtered-old-files'),
+        unstableRecentFiles: document.getElementById('monitor-unstable-recent-files'),
         scannedRoots: document.getElementById('monitor-scanned-roots'),
-        discoveredFiles: document.getElementById('monitor-discovered-files')
+        discoveredFiles: document.getElementById('monitor-discovered-files'),
+        lastImportStatus: document.getElementById('last-import-status'),
+        lastImportTrigger: document.getElementById('last-import-trigger'),
+        lastImportProcessed: document.getElementById('last-import-processed'),
+        lastImportSkipped: document.getElementById('last-import-skipped'),
+        lastImportStarted: document.getElementById('last-import-started'),
+        lastImportCompleted: document.getElementById('last-import-completed'),
+        lastImportMessage: document.getElementById('last-import-message'),
+        lastImportActiveBlock: document.getElementById('last-import-active-block'),
+        lastImportActivePaths: document.getElementById('last-import-active-paths'),
+        lastImportMissingBlock: document.getElementById('last-import-missing-block'),
+        lastImportMissingPaths: document.getElementById('last-import-missing-paths')
       };
 
       function setText(node, value) {
@@ -253,6 +239,9 @@
 
       function renderMonitor(monitor) {
         const status = monitor.status || 'idle';
+        const isScanning = (monitor.phase || '') === 'Scanning folders';
+        const scannedRoots = monitor.scanned_roots || 0;
+        const totalRoots = monitor.total_roots || 0;
         setText(nodes.statusPill, status);
         nodes.statusPill.classList.remove('scanned', 'missed');
         if (status === 'success') {
@@ -264,7 +253,11 @@
         const percent = monitor.progress_percent || 0;
         setText(nodes.phase, monitor.phase || 'Idle');
         setText(nodes.progressText, `${percent}%`);
-        setText(nodes.stepText, `${monitor.current_step || 0} / ${monitor.total_steps || 0}`);
+        if (isScanning && totalRoots > 0) {
+          setText(nodes.stepText, `${scannedRoots} / ${totalRoots} folders`);
+        } else {
+          setText(nodes.stepText, `${monitor.current_step || 0} / ${monitor.total_steps || 0}`);
+        }
         setText(nodes.processed, String(monitor.processed || 0));
         setText(nodes.skipped, String(monitor.skipped || 0));
         setText(nodes.errors, String(monitor.errors || 0));
@@ -279,6 +272,7 @@
         setText(nodes.datGroups, String(monitor.dat_groups || 0));
         setText(nodes.duplicateDats, String(monitor.duplicate_dat_files || 0));
         setText(nodes.filteredOldFiles, String(monitor.filtered_old_files || 0));
+        setText(nodes.unstableRecentFiles, String(monitor.unstable_recent_files || 0));
         setText(nodes.scannedRoots, `${monitor.scanned_roots || 0} / ${monitor.total_roots || 0}`);
         setText(nodes.discoveredFiles, String(monitor.discovered_supported_files || 0));
         if (nodes.progressBar) {
@@ -291,6 +285,41 @@
         }
       }
 
+      function renderPathList(listNode, values) {
+        if (!listNode) {
+          return;
+        }
+        listNode.innerHTML = '';
+        values.forEach((value) => {
+          const item = document.createElement('li');
+          item.textContent = value;
+          listNode.appendChild(item);
+        });
+      }
+
+      function renderLastImport(lastImport) {
+        const data = lastImport || {};
+        setText(nodes.lastImportStatus, data.status || 'idle');
+        setText(nodes.lastImportTrigger, data.trigger || 'manual');
+        setText(nodes.lastImportProcessed, String(data.processed || 0));
+        setText(nodes.lastImportSkipped, String(data.skipped || 0));
+        setText(nodes.lastImportStarted, `Started: ${data.started_at || 'Not run yet'}`);
+        setText(nodes.lastImportCompleted, `Completed: ${data.completed_at || 'Not run yet'}`);
+        setText(nodes.lastImportMessage, data.message || 'No import has been run yet.');
+
+        const activePaths = Array.isArray(data.active_paths) ? data.active_paths : [];
+        const missingPaths = Array.isArray(data.missing_paths) ? data.missing_paths : [];
+
+        if (nodes.lastImportActiveBlock) {
+          nodes.lastImportActiveBlock.hidden = activePaths.length === 0;
+        }
+        if (nodes.lastImportMissingBlock) {
+          nodes.lastImportMissingBlock.hidden = missingPaths.length === 0;
+        }
+        renderPathList(nodes.lastImportActivePaths, activePaths);
+        renderPathList(nodes.lastImportMissingPaths, missingPaths);
+      }
+
       async function pollMonitor() {
         try {
           const response = await fetch(statusUrl, { headers: { 'X-Requested-With': 'fetch' } });
@@ -299,6 +328,7 @@
           }
           const payload = await response.json();
           renderMonitor(payload.import_monitor || {});
+          renderLastImport(payload.last_import || {});
         } catch (_error) {
         }
       }

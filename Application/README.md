@@ -16,10 +16,6 @@ This workspace now supports:
 - rebuilding SQL-only nest/part lookup data
 - generating printable test barcodes for scan values like `.DAT` filenames
 - running a minimal clean Flask UI for user/location/nest/part scanning
-- using an admin page to switch test/production source folders, force imports, and clear parsed data
-- showing live import progress, stats, and errors during manual or automatic imports
-- skipping supported import files older than 6 months during folder scans
-- scanning only the top level of Amada, EMK1, and Laser folders while keeping Programming folders recursive
 
 ## Database location
 
@@ -43,12 +39,6 @@ Run:
 Then open:
 
 - `http://127.0.0.1:5000/`
-
-Admin settings:
-
-- `http://127.0.0.1:5000/admin/login`
-- username: `admin`
-- password: `password`
 
 Current flow:
 

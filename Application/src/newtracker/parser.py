@@ -110,6 +110,61 @@ class ParsedNestComparisonRow:
     source_file_path: str
 
 
+@dataclass
+class ParsedYanoprogRow:
+    process_code: str
+    part_number: str
+    order_quantity: int | None
+    order_date_token: str
+    order_number: str
+    priority: str
+    revision: str
+    route_hint: str
+    source_file_path: str
+
+
+@dataclass
+class ParsedLabelFileRow:
+    part_number: str
+    barcode: str
+    assembly: str
+    unit_id: str
+    skid_number: str
+    skid_order: str
+    build_day: str
+    color: str
+    nest_name: str
+    length: float | None
+    width: float | None
+    material: str
+    quantity: int | None
+    routing: str
+    print_quantity: int | None
+    source_file_path: str
+
+
+@dataclass
+class ParsedOrderInRow:
+    job_number: str
+    order_group: str
+    quantity: int | None
+    length: float | None
+    material: str
+    profile: str
+    part_number: str
+    raw_identifier: str
+    source_file_path: str
+
+
+@dataclass
+class ParsedChannelRollformerRow:
+    job_number: str
+    material: str
+    profile: str
+    description: str
+    source_file_path: str
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -342,3 +397,90 @@ def parse_nest_comparison_csv(path: Path) -> Iterable[ParsedNestComparisonRow]:
                 split_value=_clean(row.get("Split Value")),
                 source_file_path=str(path),
             )
+
+
+def parse_yanoprog_csv(path: Path) -> Iterable[ParsedYanoprogRow]:
+    process_code = path.stem.replace("yanoprog", "").replace("YANOPROG", "").strip(" _-").upper()
+    with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            part_number = _clean(row.get("PARTNO"))
+            if not part_number:
+                continue
+            yield ParsedYanoprogRow(
+                process_code=process_code or "UNKNOWN",
+                part_number=part_number,
+                order_quantity=_to_int(row.get("ORDQTY")),
+                order_date_token=_clean(row.get("ORDDATE")),
+                order_number=_clean(row.get("ORDERNO")),
+                priority=_clean(row.get("ORDPRI")),
+                revision=_clean(row.get("REVISION")),
+                route_hint=_clean(row.get("ORDUDT01")),
+                source_file_path=str(path),
+            )
+
+
+def parse_spp_label_file_csv(path: Path) -> Iterable[ParsedLabelFileRow]:
+    with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            part_number = _clean(row.get("PartNumber"))
+            if not part_number:
+                continue
+            yield ParsedLabelFileRow(
+                part_number=part_number,
+                barcode=_clean(row.get("barcode")),
+                assembly=_clean(row.get("Assembly")),
+                unit_id=_clean(row.get("Unitid")),
+                skid_number=_clean(row.get("SkidNumber")),
+                skid_order=_clean(row.get("SkidOrder")),
+                build_day=_clean(row.get("BuildDay")),
+                color=_clean(row.get("Color")),
+                nest_name=_clean(row.get("NestName")),
+                length=_to_float(row.get("Length")),
+                width=_to_float(row.get("Width")),
+                material=_clean(row.get("Material")),
+                quantity=_to_int(row.get("PartQuantityString")),
+                routing=_clean(row.get("Routing")),
+                print_quantity=_to_int(row.get("PrintQuantity")),
+                source_file_path=str(path),
+            )
+
+
+def parse_order_in_csv(path: Path) -> Iterable[ParsedOrderInRow]:
+    with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            if len(row) < 8:
+                continue
+            part_number = _clean(row[7])
+            if not part_number:
+                continue
+            raw_identifier = _clean(row[-1]) if row else ""
+            yield ParsedOrderInRow(
+                job_number=_clean(row[0]),
+                order_group=_clean(row[1]),
+                quantity=_to_int(row[2] if len(row) > 2 else None),
+                length=_to_float(row[3] if len(row) > 3 else None),
+                material=_clean(row[4] if len(row) > 4 else None),
+                profile=_clean(row[5] if len(row) > 5 else None),
+                part_number=part_number,
+                raw_identifier=raw_identifier,
+                source_file_path=str(path),
+            )
+
+
+def parse_channel_rollformer_input_csv(path: Path) -> ParsedChannelRollformerRow | None:
+    with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            if not row or _clean(row[0]).upper() != "J":
+                continue
+            return ParsedChannelRollformerRow(
+                job_number=_clean(row[1] if len(row) > 1 else None),
+                material=_clean(row[2] if len(row) > 2 else None),
+                profile=_clean(row[3] if len(row) > 3 else None),
+                description=_clean(row[4] if len(row) > 4 else None),
+                source_file_path=str(path),
+            )
+    return None

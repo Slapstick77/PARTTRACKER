@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 
@@ -22,7 +23,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "ui" / "static"
 def create_ui_app() -> Flask:
     app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR))
     app.config["SECRET_KEY"] = "newtracker-clean-ui"
-    store = UiStateStore()
+    store = cast(Any, UiStateStore())
     admin_store = AdminSettingsStore()
 
     @app.before_request
@@ -324,18 +325,6 @@ def create_ui_app() -> Flask:
             flash("An import is already running. Watch the monitor below for progress.", "error")
         else:
             flash("Import started. The monitor will update while files are being processed.", "success")
-        return redirect(url_for("admin_home"))
-
-    @app.post("/admin/correction-now")
-    def admin_correction_now():
-        guard = require_admin()
-        if guard is not None:
-            return guard
-        started = start_import_job(admin_store, trigger="correction-manual", correction_run=True)
-        if not started:
-            flash("A job is already running. Watch the monitor below for progress.", "error")
-        else:
-            flash("Correction run started. This may take longer because it can reevaluate existing imported data.", "success")
         return redirect(url_for("admin_home"))
 
     @app.post("/admin/clear-parsed-data")
