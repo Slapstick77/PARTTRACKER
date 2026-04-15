@@ -16,6 +16,7 @@
           </div>
           <div class="header-actions">
             <a href="{{ url_for('home') }}" class="button-link">Back to Scanner</a>
+            <a href="{{ url_for('admin_changelog') }}" class="button-link">View Changelog</a>
             <form method="post" action="{{ url_for('admin_logout') }}">
               <button type="submit" class="secondary">Log Out</button>
             </form>
@@ -109,6 +110,21 @@
           </div>
 
           <div class="admin-action-stack">
+            <section class="admin-action-card status-card">
+              <h3>Project changelog</h3>
+              <p class="muted">Open the running change log for import fixes, reliability work, and UI changes already made in this project.</p>
+              <a href="{{ url_for('admin_changelog') }}" class="button-link">Open Changelog</a>
+            </section>
+
+            <section class="admin-action-card status-card">
+              <h3>Admin security</h3>
+              <p class="muted">Current username {{ admin_username }}. Open the separate security screen to change the admin login.</p>
+              {% if security.password_is_temporary %}
+              <p class="monitor-error">The admin password is still using the temporary bootstrap value.</p>
+              {% endif %}
+              <a href="{{ url_for('admin_security') }}" class="button-link">Open Security Settings</a>
+            </section>
+
             <form method="post" action="{{ url_for('admin_import_now') }}" class="admin-action-card">
               <h3>Look For New Files</h3>
               <p class="muted">Run the single unified import. It scans the active folders, rebuilds job context from programming-folder files, parses DAT files, and refreshes resolved matches.</p>

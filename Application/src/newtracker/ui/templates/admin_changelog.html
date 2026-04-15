@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Project Changelog</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
+  </head>
+  <body>
+    <main class="page-shell admin-page-shell">
+      <section class="top-panel admin-top-panel">
+        <div class="panel-title-row">
+          <div class="title-block">
+            <h1>Project Changelog</h1>
+            <p class="muted">Tracked fixes and changes for the current NEWTRACKER application, organized as release notes instead of raw markdown.</p>
+            <p class="muted">Updated {{ changelog_updated or 'unknown' }}</p>
+          </div>
+          <div class="header-actions">
+            <a href="{{ url_for('admin_home') }}" class="button-link">Back to Admin</a>
+            <a href="{{ url_for('admin_security') }}" class="button-link">Security</a>
+            <form method="post" action="{{ url_for('admin_logout') }}">
+              <button type="submit" class="secondary">Log Out</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section class="bottom-panel admin-bottom-panel">
+        <article class="list-pane list-full-pane changelog-pane">
+          <div class="changelog-hero">
+            <div>
+              <p class="eyebrow">Development history</p>
+              <h2>Recent changes</h2>
+            </div>
+            <div class="changelog-meta-card">
+              <span>Entries</span>
+              <strong>{{ changelog_entries|length }}</strong>
+            </div>
+          </div>
+
+          {% if changelog_intro %}
+          <div class="changelog-intro">
+            {% for paragraph in changelog_intro %}
+            <p>{{ paragraph }}</p>
+            {% endfor %}
+          </div>
+          {% endif %}
+
+          <div class="changelog-entry-stack">
+            {% for entry in changelog_entries %}
+            <section class="changelog-entry-card">
+              <div class="changelog-entry-header">
+                <div>
+                  <p class="eyebrow">Snapshot</p>
+                  <h3>{{ entry.title }}</h3>
+                </div>
+                <div class="changelog-meta-card compact">
+                  <span>Items</span>
+                  <strong>{{ entry.item_count }}</strong>
+                </div>
+              </div>
+
+              <div class="changelog-section-grid">
+                {% for section in entry.sections %}
+                <article class="changelog-section-card">
+                  <div class="changelog-section-title-row">
+                    <h4>{{ section.title }}</h4>
+                    {% if section["items"] %}
+                    <span class="changelog-count-pill">{{ section["items"]|length }}</span>
+                    {% endif %}
+                  </div>
+                  {% for paragraph in section["paragraphs"] %}
+                  <p class="muted">{{ paragraph }}</p>
+                  {% endfor %}
+                  {% if section["items"] %}
+                  <ul class="changelog-list">
+                    {% for item in section["items"] %}
+                    <li>{{ item }}</li>
+                    {% endfor %}
+                  </ul>
+                  {% endif %}
+                </article>
+                {% endfor %}
+              </div>
+            </section>
+            {% endfor %}
+          </div>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

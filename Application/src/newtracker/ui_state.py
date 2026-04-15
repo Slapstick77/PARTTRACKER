@@ -1,29 +1,74 @@
 from __future__ import annotations
 
-import json
 import re
+import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .db import DATA_DIR, get_connection
+from .persistence import atomic_write_json, read_json_file
 
-UI_STATE_PATH = DATA_DIR / "ui_scan_state.json"
-COMPLETED_LIST_PATH = DATA_DIR / "completed_scan_list.json"
+LEGACY_UI_STATE_PATH = DATA_DIR / "ui_scan_state.json"
+LEGACY_COMPLETED_LIST_PATH = DATA_DIR / "completed_scan_list.json"
+UI_SESSION_DIR = DATA_DIR / "ui_sessions"
+LEGACY_MIGRATION_MARKER = UI_SESSION_DIR / ".legacy-migrated.json"
+_UI_STATE_LOCK = threading.RLock()
 
 class UiStateError(ValueError):
     pass
 
 
 class UiStateStore:
-    def __init__(self, path: Path | None = None) -> None:
-        self.path = path or UI_STATE_PATH
-        self.completed_path = COMPLETED_LIST_PATH
+    def __init__(self, session_key: str | None = None, path: Path | None = None) -> None:
+        safe_session_key = re.sub(r"[^A-Za-z0-9_-]", "", session_key or "") or "shared"
+        self.session_key = safe_session_key
+        self.session_dir = UI_SESSION_DIR / safe_session_key
+        self.path = path or (self.session_dir / "ui_scan_state.json")
+        self.completed_path = self.session_dir / "completed_scan_list.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_state_if_needed()
         if not self.path.exists():
             self.reset()
         if not self.completed_path.exists():
             self._write_completed([])
+
+    def _migrate_legacy_state_if_needed(self) -> None:
+        with _UI_STATE_LOCK:
+            if LEGACY_MIGRATION_MARKER.exists():
+                return
+
+            migrated = False
+            if LEGACY_UI_STATE_PATH.exists() and not self.path.exists():
+                payload = read_json_file(LEGACY_UI_STATE_PATH, self._default_state, quarantine_corrupt=True)
+                state = payload if isinstance(payload, dict) else self._default_state()
+                atomic_write_json(self.path, state)
+                migrated = True
+
+            if LEGACY_COMPLETED_LIST_PATH.exists() and not self.completed_path.exists():
+                payload = read_json_file(LEGACY_COMPLETED_LIST_PATH, list, quarantine_corrupt=True)
+                rows = payload if isinstance(payload, list) else []
+                atomic_write_json(self.completed_path, rows)
+                migrated = True
+
+            if migrated:
+                atomic_write_json(
+                    LEGACY_MIGRATION_MARKER,
+                    {
+                        "migrated_at": datetime.now().isoformat(timespec="seconds"),
+                        "session_key": self.session_key,
+                    },
+                )
+
+    @classmethod
+    def clear_all_persisted_state(cls) -> None:
+        with _UI_STATE_LOCK:
+            if UI_SESSION_DIR.exists():
+                shutil.rmtree(UI_SESSION_DIR, ignore_errors=True)
+            for legacy_path in (LEGACY_UI_STATE_PATH, LEGACY_COMPLETED_LIST_PATH):
+                if legacy_path.exists():
+                    legacy_path.unlink()
 
     def _default_state(self) -> dict[str, Any]:
         return {
@@ -45,20 +90,22 @@ class UiStateStore:
         }
 
     def read(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return self._default_state()
-        return json.loads(self.path.read_text(encoding="utf-8"))
+        with _UI_STATE_LOCK:
+            payload = read_json_file(self.path, self._default_state, quarantine_corrupt=True)
+            return payload if isinstance(payload, dict) else self._default_state()
 
     def write(self, state: dict[str, Any]) -> None:
-        self.path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        with _UI_STATE_LOCK:
+            atomic_write_json(self.path, state)
 
     def _read_completed(self) -> list[dict[str, Any]]:
-        if not self.completed_path.exists():
-            return []
-        return json.loads(self.completed_path.read_text(encoding="utf-8"))
+        with _UI_STATE_LOCK:
+            payload = read_json_file(self.completed_path, list, quarantine_corrupt=True)
+            return payload if isinstance(payload, list) else []
 
     def _write_completed(self, rows: list[dict[str, Any]]) -> None:
-        self.completed_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        with _UI_STATE_LOCK:
+            atomic_write_json(self.completed_path, rows)
 
     def reset(self) -> dict[str, Any]:
         previous = self.read() if self.path.exists() else self._default_state()

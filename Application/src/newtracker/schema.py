@@ -275,6 +275,31 @@ def create_schema(connection: sqlite3.Connection) -> None:
             processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS import_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger TEXT NOT NULL,
+            status TEXT NOT NULL,
+            message TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            active_paths_json TEXT NOT NULL DEFAULT '[]',
+            missing_paths_json TEXT NOT NULL DEFAULT '[]',
+            processed INTEGER NOT NULL DEFAULT 0,
+            skipped INTEGER NOT NULL DEFAULT 0,
+            errors INTEGER NOT NULL DEFAULT 0,
+            missing_files INTEGER NOT NULL DEFAULT 0,
+            total_supported_files INTEGER NOT NULL DEFAULT 0,
+            nest_files INTEGER NOT NULL DEFAULT 0,
+            dat_files INTEGER NOT NULL DEFAULT 0,
+            dat_groups INTEGER NOT NULL DEFAULT 0,
+            duplicate_dat_files INTEGER NOT NULL DEFAULT 0,
+            filtered_old_files INTEGER NOT NULL DEFAULT 0,
+            unstable_recent_files INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_nest_parts_part_number
             ON nest_parts(part_number, part_revision);
 
@@ -298,6 +323,12 @@ def create_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_processed_files_status
             ON processed_files(status, file_type);
+
+        CREATE INDEX IF NOT EXISTS idx_import_runs_started_at
+            ON import_runs(started_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_import_runs_status_started_at
+            ON import_runs(status, started_at DESC);
         """
     )
 
@@ -381,8 +412,17 @@ def create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_part_attributes_resolve_lookup
             ON part_attributes(part_number, normalized_rev_key, build_date);
 
+        CREATE INDEX IF NOT EXISTS idx_part_attributes_part_com_lookup
+            ON part_attributes(part_number, com_number);
+
         CREATE INDEX IF NOT EXISTS idx_job_parts_resolve_lookup
             ON job_parts(part_number, revision_key, job_folder_id);
+
+        CREATE INDEX IF NOT EXISTS idx_job_parts_job_folder_part_lookup
+            ON job_parts(job_folder_id, part_number);
+
+        CREATE INDEX IF NOT EXISTS idx_job_labels_job_folder_part_lookup
+            ON job_labels(job_folder_id, part_number);
 
         CREATE INDEX IF NOT EXISTS idx_resolved_nest_parts_barcode
             ON resolved_nest_parts(barcode_filename, part_number);

@@ -14,6 +14,7 @@ Application/data/import_scan_cache.json
 Application/data/newtracker.db
 Application/data/scan_sessions.json
 Application/data/ui_scan_state.json
+Application/data/ui_sessions/
 Application/data/barcode_sheets/
 
 .pytest_cache/

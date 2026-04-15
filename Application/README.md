@@ -50,9 +50,19 @@ Current flow:
 - expected parts stay on the left with reduced remaining counts
 - scanned parts accumulate on the right
 
-Test UI state is stored at:
+Scanner UI state is now stored per browser session under:
 
-- `Application/data/ui_scan_state.json`
+- `Application/data/ui_sessions/<session-key>/ui_scan_state.json`
+
+Completed scan archives are stored beside the session state file:
+
+- `Application/data/ui_sessions/<session-key>/completed_scan_list.json`
+
+Admin security settings are stored in:
+
+- `Application/data/admin_settings.json`
+
+Existing installs keep the legacy bootstrap admin login until it is changed from the Admin Settings page.
 
 ## Generate test barcode sheets
 
@@ -86,6 +96,14 @@ The current layout uses wider, longer Code 128 barcodes to improve printed scann
 ## Notes
 
 - The expected parts still come from your SQL-only import pipeline.
+
+## Changelog
+
+Project changes are tracked in:
+
+- `CHANGELOG.md`
+
+The admin UI also exposes the same changelog from the Admin Settings page.
 
 ## Import rules reference
 

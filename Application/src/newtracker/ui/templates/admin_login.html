@@ -32,7 +32,7 @@
         <form method="post" action="{{ url_for('admin_login_submit') }}" class="admin-login-card">
           <label>
             <span>Username</span>
-            <input name="username" value="admin" autocomplete="username" autofocus>
+            <input name="username" value="{{ admin_username }}" autocomplete="username" autofocus>
           </label>
           <label>
             <span>Password</span>

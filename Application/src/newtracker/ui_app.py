@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import re
+import secrets
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
 from flask import Flask, flash, redirect, render_template, request, session, url_for
+from markupsafe import Markup, escape
 
 from .admin_settings import (
-    ADMIN_PASSWORD,
-    ADMIN_USERNAME,
     AdminSettingsError,
     AdminSettingsStore,
     clear_parsed_data,
@@ -18,17 +20,113 @@ from .ui_state import UiStateError, UiStateStore
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "ui" / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "ui" / "static"
+CHANGELOG_PATH = Path(__file__).resolve().parents[3] / "CHANGELOG.md"
+INLINE_CODE_PATTERN = re.compile(r"`([^`]+)`")
+
+
+class SessionUiStateProxy:
+    def __init__(self, resolver):
+        self._resolver = resolver
+
+    def __getattr__(self, name: str):
+        return getattr(self._resolver(), name)
+
+
+def _render_inline_changelog_text(text: str) -> Markup:
+    rendered: list[Markup] = []
+    last_index = 0
+    for match in INLINE_CODE_PATTERN.finditer(text):
+        rendered.append(Markup(escape(text[last_index:match.start()])))
+        rendered.append(Markup("<code>%s</code>" % escape(match.group(1))))
+        last_index = match.end()
+    rendered.append(Markup(escape(text[last_index:])))
+    return Markup("").join(rendered)
+
+
+def _parse_changelog(raw_text: str) -> dict[str, Any]:
+    intro: list[Markup] = []
+    entries: list[dict[str, Any]] = []
+    current_entry: dict[str, Any] | None = None
+    current_section: dict[str, Any] | None = None
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            current_section = current_section if current_section and current_section["paragraphs"] else current_section
+            continue
+        if stripped == "# Changelog":
+            continue
+        if stripped.startswith("## "):
+            current_entry = {
+                "title": stripped[3:].strip(),
+                "sections": [],
+                "item_count": 0,
+            }
+            entries.append(current_entry)
+            current_section = None
+            continue
+        if stripped.startswith("### "):
+            if current_entry is None:
+                continue
+            current_section = {
+                "title": stripped[4:].strip(),
+                "items": [],
+                "paragraphs": [],
+            }
+            current_entry["sections"].append(current_section)
+            continue
+
+        rendered = _render_inline_changelog_text(stripped)
+        if stripped.startswith("- "):
+            content = _render_inline_changelog_text(stripped[2:].strip())
+            section = current_section
+            if section is None:
+                if current_entry is None:
+                    intro.append(content)
+                    continue
+                section = {"title": "Notes", "items": [], "paragraphs": []}
+                current_entry["sections"].append(section)
+                current_section = section
+            section["items"].append(content)
+            if current_entry is not None:
+                current_entry["item_count"] += 1
+            continue
+
+        if current_section is not None:
+            current_section["paragraphs"].append(rendered)
+        elif current_entry is None:
+            intro.append(rendered)
+
+    entries.reverse()
+    return {
+        "intro": intro,
+        "entries": entries,
+    }
 
 
 def create_ui_app() -> Flask:
     app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR))
-    app.config["SECRET_KEY"] = "newtracker-clean-ui"
-    store = cast(Any, UiStateStore())
     admin_store = AdminSettingsStore()
+    app.config["SECRET_KEY"] = admin_store.secret_key()
+
+    def current_ui_session_key() -> str:
+        session_key = str(session.get("ui_session_key") or "").strip()
+        if not session_key:
+            session_key = secrets.token_urlsafe(16)
+            session["ui_session_key"] = session_key
+            session.modified = True
+        return session_key
+
+    def resolve_ui_store() -> Any:
+        return cast(Any, UiStateStore(session_key=current_ui_session_key()))
+
+    store = cast(Any, SessionUiStateProxy(resolve_ui_store))
 
     @app.before_request
     def start_background_monitor() -> None:
         ensure_import_monitor_started()
+        current_ui_session_key()
 
     def build_context() -> dict:
         state = store.read()
@@ -51,9 +149,10 @@ def create_ui_app() -> Flask:
         return {
             "settings": settings,
             "sources": admin_store.describe_sources(settings),
-            "last_import": settings.get("last_import", {}),
+            "last_import": admin_store.latest_import_result(settings),
             "import_monitor": admin_store.import_monitor(),
-            "admin_username": ADMIN_USERNAME,
+            "admin_username": admin_store.admin_username(settings),
+            "security": settings.get("security", {}),
         }
 
     def require_admin():
@@ -64,6 +163,18 @@ def create_ui_app() -> Flask:
 
     def build_formed_context() -> dict:
         return store.formed_context()
+
+    def load_changelog() -> dict[str, str]:
+        if not CHANGELOG_PATH.exists():
+            return {
+                "content": "# Changelog\n\nNo changelog entries yet.",
+                "updated_at": "",
+            }
+        updated_at = datetime.fromtimestamp(CHANGELOG_PATH.stat().st_mtime).isoformat(timespec="seconds")
+        return {
+            "content": CHANGELOG_PATH.read_text(encoding="utf-8"),
+            "updated_at": updated_at,
+        }
 
     @app.get("/")
     def home():
@@ -268,20 +379,20 @@ def create_ui_app() -> Flask:
         settings = admin_store.read()
         return {
             "import_monitor": admin_store.import_monitor(),
-            "last_import": settings.get("last_import", {}),
+            "last_import": admin_store.latest_import_result(settings),
         }
 
     @app.get("/admin/login")
     def admin_login():
         if session.get("is_admin"):
             return redirect(url_for("admin_home"))
-        return render_template("admin_login.html")
+        return render_template("admin_login.html", admin_username=admin_store.admin_username())
 
     @app.post("/admin/login")
     def admin_login_submit():
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        if admin_store.authenticate_admin(username, password):
             session["is_admin"] = True
             flash("Admin login successful.", "success")
             return redirect(url_for("admin_home"))
@@ -302,6 +413,32 @@ def create_ui_app() -> Flask:
             return guard
         return render_template("admin.html", **admin_context())
 
+    @app.get("/admin/security")
+    def admin_security():
+        guard = require_admin()
+        if guard is not None:
+            return guard
+        settings = admin_store.read()
+        return render_template(
+            "admin_security.html",
+            admin_username=admin_store.admin_username(settings),
+            security=settings.get("security", {}),
+        )
+
+    @app.get("/admin/changelog")
+    def admin_changelog():
+        guard = require_admin()
+        if guard is not None:
+            return guard
+        changelog = load_changelog()
+        parsed = _parse_changelog(changelog["content"])
+        return render_template(
+            "admin_changelog.html",
+            changelog_intro=parsed["intro"],
+            changelog_entries=parsed["entries"],
+            changelog_updated=changelog["updated_at"],
+        )
+
     @app.post("/admin/settings")
     def save_admin_settings():
         guard = require_admin()
@@ -314,6 +451,19 @@ def create_ui_app() -> Flask:
         else:
             flash("Admin settings saved.", "success")
         return redirect(url_for("admin_home"))
+
+    @app.post("/admin/security")
+    def save_admin_security():
+        guard = require_admin()
+        if guard is not None:
+            return guard
+        try:
+            admin_store.update_security_from_form(request.form)
+        except AdminSettingsError as exc:
+            flash(str(exc), "error")
+        else:
+            flash("Admin credentials updated.", "success")
+        return redirect(url_for("admin_security"))
 
     @app.post("/admin/import-now")
     def admin_import_now():

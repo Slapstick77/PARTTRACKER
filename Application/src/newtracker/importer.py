@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from collections import defaultdict
@@ -20,6 +21,7 @@ from .parser import (
     parse_spp_label_file_csv,
     parse_yanoprog_csv,
 )
+from .persistence import atomic_write_json, read_json_file
 from .schema import create_schema
 
 SCAN_CACHE_PATH = APP_ROOT / "data" / "import_scan_cache.json"
@@ -37,8 +39,14 @@ IGNORED_SOURCE_PATHS = {
     Path(r"P:\Manufacturing\CNC\Amada\OLD"),
 }
 IGNORED_SOURCE_PATH_KEYS = {str(path).casefold() for path in IGNORED_SOURCE_PATHS}
+IMMUTABLE_SOURCE_ROOTS = {Path(r"P:\Manufacturing\CNC")}
+IMMUTABLE_SOURCE_ROOT_KEYS = {str(path).casefold() for path in IMMUTABLE_SOURCE_ROOTS}
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+class SourceAccessError(RuntimeError):
+    pass
 
 
 def _empty_scan_cache() -> dict[str, Any]:
@@ -58,8 +66,8 @@ def canonical_key(path: Path) -> str:
     return path.suffix.lower()
 
 
-def classify_file(path: Path) -> str | None:
-    lower_name = path.name.lower()
+def classify_file_name(name: str) -> str | None:
+    lower_name = name.lower()
     if lower_name == "nestcomparison.csv":
         return "nest_comparison"
     if lower_name == "spplabelfile.csv":
@@ -70,18 +78,17 @@ def classify_file(path: Path) -> str | None:
         return "order_in"
     if lower_name.startswith("channelrollformerinput") and lower_name.endswith(".csv"):
         return "channel_rollformer"
-    if path.suffix.lower() == ".dat":
+    if lower_name.endswith(".dat"):
         return "amada_dat"
     return None
 
 
+def classify_file(path: Path) -> str | None:
+    return classify_file_name(path.name)
+
+
 def load_scan_cache() -> dict[str, Any]:
-    if not SCAN_CACHE_PATH.exists():
-        return _empty_scan_cache()
-    try:
-        payload = json.loads(SCAN_CACHE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return _empty_scan_cache()
+    payload = read_json_file(SCAN_CACHE_PATH, _empty_scan_cache, quarantine_corrupt=True)
 
     if not isinstance(payload, dict):
         return _empty_scan_cache()
@@ -95,27 +102,36 @@ def load_scan_cache() -> dict[str, Any]:
 
 
 def save_scan_cache(cache: dict[str, Any]) -> None:
-    SCAN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "roots": dict(cache.get("roots", {})) if isinstance(cache.get("roots"), Mapping) else {},
         "deferred_supported_files": [str(value) for value in cache.get("deferred_supported_files", [])],
     }
-    SCAN_CACHE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_json(SCAN_CACHE_PATH, payload)
 
 
 def clear_scan_cache() -> None:
     save_scan_cache(_empty_scan_cache())
 
 
+def _raise_if_source_unavailable(path: Path, exc: OSError, *, action: str) -> None:
+    if is_immutable_source_path(path):
+        raise SourceAccessError(f"Lost access to P drive while {action}: {path}") from exc
+
+
 def _directory_mtime_ns(path: Path) -> int:
-    stat = path.stat()
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        _raise_if_source_unavailable(path, exc, action="reading source directory")
+        raise
     return getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
 
 
 def _safe_stat(path: Path):
     try:
         return path.stat()
-    except OSError:
+    except OSError as exc:
+        _raise_if_source_unavailable(path, exc, action="reading source file metadata")
         return None
 
 
@@ -125,6 +141,20 @@ def is_ignored_source_path(path: Path) -> bool:
         if candidate == ignored or candidate.startswith(f"{ignored}\\"):
             return True
     return False
+
+
+def is_immutable_source_path(path: Path) -> bool:
+    candidate = str(path).casefold()
+    for root in IMMUTABLE_SOURCE_ROOT_KEYS:
+        if candidate == root or candidate.startswith(f"{root}\\"):
+            return True
+    return False
+
+
+def should_trust_directory_cache(path: Path, *, recursive: bool, is_root: bool) -> bool:
+    if is_root and not recursive and is_immutable_source_path(path):
+        return False
+    return True
 
 
 def _normalize_cached_node(node: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -148,6 +178,7 @@ def _scan_directory_tree(
     recursive: bool,
     now: datetime,
     changed_since: datetime | None,
+    processed_paths: set[str],
     deferred_paths: set[str],
     next_deferred: set[str],
     cache_node: Mapping[str, Any] | None,
@@ -190,7 +221,12 @@ def _scan_directory_tree(
                 "children": {},
             }, 0
 
-    if normalized_cache and normalized_cache["recursive"] == recursive and normalized_cache["mtime_ns"] == mtime_ns:
+    if (
+        should_trust_directory_cache(path, recursive=recursive, is_root=is_root)
+        and normalized_cache
+        and normalized_cache["recursive"] == recursive
+        and normalized_cache["mtime_ns"] == mtime_ns
+    ):
         return (
             [Path(value) for value in normalized_cache["all_supported_files"]],
             normalized_cache["filtered_old_files"],
@@ -210,22 +246,28 @@ def _scan_directory_tree(
         }
 
     try:
-        entries = sorted(path.iterdir(), key=lambda entry: entry.name.casefold())
-    except OSError:
+        with os.scandir(path) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name.casefold())
+    except OSError as exc:
+        _raise_if_source_unavailable(path, exc, action="scanning source directory")
         entries = []
 
     for entry in entries:
-        if entry.is_dir():
-            if is_ignored_source_path(entry) or not recursive:
+        if entry.is_dir(follow_symlinks=False):
+            if not recursive:
+                continue
+            entry_path = Path(entry.path)
+            if is_ignored_source_path(entry_path):
                 continue
             child_files, child_filtered_old, child_node, child_unstable = _scan_directory_tree(
-                entry,
+                entry_path,
                 recursive=True,
                 now=now,
                 changed_since=changed_since,
+                processed_paths=processed_paths,
                 deferred_paths=deferred_paths,
                 next_deferred=next_deferred,
-                cache_node=child_cache_map.get(str(entry).casefold()),
+                cache_node=child_cache_map.get(str(entry_path).casefold()),
                 root_index=root_index,
                 total_roots=total_roots,
                 is_root=False,
@@ -233,37 +275,52 @@ def _scan_directory_tree(
             supported_files.extend(child_files)
             filtered_old_files += child_filtered_old
             unstable_recent_files += child_unstable
-            children[str(entry)] = child_node
+            children[str(entry_path)] = child_node
             continue
 
-        if not entry.is_file() or is_ignored_source_path(entry):
+        if not entry.is_file(follow_symlinks=False):
             continue
 
-        file_type = classify_file(entry)
+        file_type = classify_file_name(entry.name)
         if file_type is None:
             continue
 
-        entry_stat = _safe_stat(entry)
-        if entry_stat is None:
+        entry_path = Path(entry.path)
+        if is_ignored_source_path(entry_path):
             continue
 
-        normalized_path = str(entry).casefold()
-        if changed_since is not None and entry_stat.st_mtime < changed_since.timestamp() and normalized_path not in deferred_paths:
+        normalized_path = str(entry_path).casefold()
+        immutable_source = is_immutable_source_path(entry_path)
+        already_processed = normalized_path in processed_paths
+
+        if immutable_source and already_processed and normalized_path not in deferred_paths:
             continue
 
-        recent_enough = is_recent_enough(entry, now=now)
-        if recent_enough is None:
+        try:
+            entry_stat = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            _raise_if_source_unavailable(entry_path, exc, action="reading source file metadata")
             continue
+
+        if (
+            changed_since is not None
+            and entry_stat.st_mtime < changed_since.timestamp()
+            and normalized_path not in deferred_paths
+            and (not immutable_source or already_processed)
+        ):
+            continue
+
+        recent_enough = _is_recent_enough_stat(entry_stat, now=now)
         if not recent_enough:
             filtered_old_files += 1
             continue
 
         if datetime.fromtimestamp(entry_stat.st_mtime) > now - IMPORT_STABILITY_WINDOW:
             unstable_recent_files += 1
-            next_deferred.add(str(entry))
+            next_deferred.add(str(entry_path))
             continue
 
-        supported_files.append(entry)
+        supported_files.append(entry_path)
 
     node = {
         "path": str(path),
@@ -280,6 +337,10 @@ def is_recent_enough(path: Path, now: datetime | None = None) -> bool | None:
     stat = _safe_stat(path)
     if stat is None:
         return None
+    return _is_recent_enough_stat(stat, now=now)
+
+
+def _is_recent_enough_stat(stat: os.stat_result, *, now: datetime | None = None) -> bool:
     cutoff = (now or datetime.now()) - MAX_IMPORT_FILE_AGE
     created_at = datetime.fromtimestamp(stat.st_ctime)
     return created_at >= cutoff
@@ -294,6 +355,7 @@ def file_content_fingerprint(path: Path, file_type: str | None = None) -> str:
     try:
         base_hash = file_sha256(path)
     except OSError as exc:
+        _raise_if_source_unavailable(path, exc, action="reading source file contents")
         raise FileNotFoundError(f"File is not readable: {path}") from exc
     if resolved_type == "amada_dat":
         return f"{base_hash}|parser={AMADA_DAT_PARSER_VERSION}"
@@ -301,14 +363,17 @@ def file_content_fingerprint(path: Path, file_type: str | None = None) -> str:
 
 
 def should_process_file(connection: sqlite3.Connection, path: Path) -> bool:
+    row = connection.execute(
+        "SELECT file_size, modified_time, content_hash, status FROM processed_files WHERE file_path = ?",
+        (str(path),),
+    ).fetchone()
+    if row is not None and row["status"] == "processed" and is_immutable_source_path(path):
+        return False
+
     stat = _safe_stat(path)
     if stat is None:
         raise FileNotFoundError(f"File is no longer available: {path}")
     file_type = classify_file(path)
-    row = connection.execute(
-        "SELECT file_size, modified_time, content_hash FROM processed_files WHERE file_path = ?",
-        (str(path),),
-    ).fetchone()
     if row is None:
         return True
 
@@ -317,6 +382,15 @@ def should_process_file(connection: sqlite3.Connection, path: Path) -> bool:
 
     expected_fingerprint = file_content_fingerprint(path, file_type)
     return (row["content_hash"] or "") != expected_fingerprint
+
+
+def load_processed_paths(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row["file_path"]).casefold()
+        for row in connection.execute(
+            "SELECT file_path FROM processed_files WHERE status = 'processed'"
+        ).fetchall()
+    }
 
 
 def upsert_processed_file(
@@ -356,7 +430,6 @@ def normalize_revision(value: str | None) -> str:
         return ""
     return cleaned
 
-
 def _coalesce_text_values(values: list[str]) -> str:
     unique_values: list[str] = []
     for value in values:
@@ -364,7 +437,6 @@ def _coalesce_text_values(values: list[str]) -> str:
         if cleaned and cleaned not in unique_values:
             unique_values.append(cleaned)
     return " | ".join(unique_values)
-
 
 def aggregate_nest_parts(parts: list[ParsedNestPart]) -> list[ParsedNestPart]:
     grouped: dict[tuple[str, str], list[ParsedNestPart]] = defaultdict(list)
@@ -519,7 +591,8 @@ def _select_best_dat_candidate(connection: sqlite3.Connection, candidates: list[
     for path in candidates:
         try:
             parsed = parse_dat_file(path)
-        except OSError:
+        except OSError as exc:
+            _raise_if_source_unavailable(path, exc, action="reading DAT file")
             continue
         quantities = [max(0, int(part.quantity_nested)) for part in parsed.parts]
         total_quantity = sum(quantities)
@@ -554,7 +627,7 @@ def _same_path(a: str | None, b: str | None) -> bool:
     return a.casefold() == b.casefold()
 
 
-def import_dat_file(connection: sqlite3.Connection, path: Path) -> None:
+def import_dat_file(connection: sqlite3.Connection, path: Path) -> int:
     parsed = parse_dat_file(path)
     merged_parts = aggregate_nest_parts(parsed.parts)
     connection.execute("DELETE FROM nest_parts WHERE source_file_path = ?", (str(path),))
@@ -619,6 +692,8 @@ def import_dat_file(connection: sqlite3.Connection, path: Path) -> None:
                 parsed.source_file_path,
             ),
         )
+
+    return nest_id
 
 
 def import_nest_comparison(connection: sqlite3.Connection, path: Path, roots: list[Path]) -> None:
@@ -849,15 +924,16 @@ def import_channel_rollformer(connection: sqlite3.Connection, path: Path, roots:
     )
 
 
-def import_file(connection: sqlite3.Connection, path: Path, roots: list[Path]) -> None:
+def import_file(connection: sqlite3.Connection, path: Path, roots: list[Path]) -> int | None:
     file_type = classify_file(path)
     if file_type is None:
-        return
+        return None
 
     content_hash = file_content_fingerprint(path, file_type)
+    imported_nest_id: int | None = None
     try:
         if file_type == "amada_dat":
-            import_dat_file(connection, path)
+            imported_nest_id = import_dat_file(connection, path)
         elif file_type == "nest_comparison":
             import_nest_comparison(connection, path, roots)
         elif file_type == "yanoprog":
@@ -880,21 +956,98 @@ def import_file(connection: sqlite3.Connection, path: Path, roots: list[Path]) -
         )
         raise
 
+    return imported_nest_id
 
-def _resolve_with_part_attributes(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+
+def _build_resolution_cache(connection: sqlite3.Connection) -> dict[str, Any]:
+    job_folders_by_id = {
+        int(row["id"]): row
+        for row in connection.execute("SELECT * FROM job_folders ORDER BY id").fetchall()
+    }
+
+    job_parts_by_part_number: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    job_parts_by_job_and_part: dict[tuple[int, str], list[sqlite3.Row]] = defaultdict(list)
+    for row in connection.execute(
+        """
+        SELECT jp.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name
+        FROM job_parts jp
+        JOIN job_folders jf ON jf.id = jp.job_folder_id
+        ORDER BY jp.id
+        """
+    ).fetchall():
+        part_number = str(row["part_number"] or "")
+        job_folder_id = int(row["job_folder_id"])
+        job_parts_by_part_number[part_number].append(row)
+        job_parts_by_job_and_part[(job_folder_id, part_number)].append(row)
+
+    job_labels_by_part_number: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    job_labels_by_job_and_part: dict[tuple[int, str], list[sqlite3.Row]] = defaultdict(list)
+    for row in connection.execute(
+        """
+        SELECT jl.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name
+        FROM job_labels jl
+        JOIN job_folders jf ON jf.id = jl.job_folder_id
+        ORDER BY jl.id
+        """
+    ).fetchall():
+        part_number = str(row["part_number"] or "")
+        job_folder_id = int(row["job_folder_id"])
+        job_labels_by_part_number[part_number].append(row)
+        job_labels_by_job_and_part[(job_folder_id, part_number)].append(row)
+
+    part_attributes_by_part_number: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    part_attributes_by_part_and_com: dict[tuple[str, Any], list[sqlite3.Row]] = defaultdict(list)
+    for row in connection.execute(
+        """
+        SELECT id, com_number, part_number, form, requires_forming, nested_on, build_date, normalized_rev_key
+        FROM part_attributes
+        ORDER BY id
+        """
+    ).fetchall():
+        part_number = str(row["part_number"] or "")
+        com_number = row["com_number"]
+        part_attributes_by_part_number[part_number].append(row)
+        part_attributes_by_part_and_com[(part_number, com_number)].append(row)
+
+    return {
+        "job_folders_by_id": job_folders_by_id,
+        "job_parts_by_part_number": job_parts_by_part_number,
+        "job_parts_by_job_and_part": job_parts_by_job_and_part,
+        "job_labels_by_part_number": job_labels_by_part_number,
+        "job_labels_by_job_and_part": job_labels_by_job_and_part,
+        "part_attributes_by_part_number": part_attributes_by_part_number,
+        "part_attributes_by_part_and_com": part_attributes_by_part_and_com,
+    }
+
+
+def _resolve_with_part_attributes(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    resolution_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     normalized_rev = normalize_revision(row["part_revision"])
     build_date = row["build_date_code"] or ""
     program_date_prefix = _program_date_prefix(row["program_date"])
+    cached_candidates = None
+    if resolution_cache is not None:
+        cached_candidates = resolution_cache["part_attributes_by_part_number"].get(str(row["part_number"] or ""), [])
 
-    candidates = connection.execute(
-        """
-        SELECT id, com_number, form, requires_forming, nested_on, build_date
-        FROM part_attributes
-        WHERE part_number = ? AND build_date = ? AND normalized_rev_key = ?
-        ORDER BY id
-        """,
-        (row["part_number"], build_date, normalized_rev),
-    ).fetchall()
+    if cached_candidates is not None:
+        candidates = [
+            candidate
+            for candidate in cached_candidates
+            if candidate["build_date"] == build_date and candidate["normalized_rev_key"] == normalized_rev
+        ]
+    else:
+        candidates = connection.execute(
+            """
+            SELECT id, com_number, form, requires_forming, nested_on, build_date, normalized_rev_key
+            FROM part_attributes
+            WHERE part_number = ? AND build_date = ? AND normalized_rev_key = ?
+            ORDER BY id
+            """,
+            (row["part_number"], build_date, normalized_rev),
+        ).fetchall()
 
     resolution_status = "missing_attributes"
     resolution_rule = None
@@ -906,15 +1059,18 @@ def _resolve_with_part_attributes(connection: sqlite3.Connection, row: sqlite3.R
         resolution_status = "resolved"
         resolution_rule = "part+build+normalized_rev"
     else:
-        candidates = connection.execute(
-            """
-            SELECT id, com_number, form, requires_forming, nested_on, build_date
-            FROM part_attributes
-            WHERE part_number = ? AND build_date = ?
-            ORDER BY id
-            """,
-            (row["part_number"], build_date),
-        ).fetchall()
+        if cached_candidates is not None:
+            candidates = [candidate for candidate in cached_candidates if candidate["build_date"] == build_date]
+        else:
+            candidates = connection.execute(
+                """
+                SELECT id, com_number, form, requires_forming, nested_on, build_date, normalized_rev_key
+                FROM part_attributes
+                WHERE part_number = ? AND build_date = ?
+                ORDER BY id
+                """,
+                (row["part_number"], build_date),
+            ).fetchall()
         selected_candidates = candidates
         if len(candidates) == 1:
             matched = candidates[0]
@@ -925,15 +1081,18 @@ def _resolve_with_part_attributes(connection: sqlite3.Connection, row: sqlite3.R
             resolution_status = "partial"
             resolution_rule = "part+build_ambiguous"
         else:
-            candidates = connection.execute(
-                """
-                SELECT id, com_number, form, requires_forming, nested_on, build_date
-                FROM part_attributes
-                WHERE part_number = ?
-                ORDER BY id
-                """,
-                (row["part_number"],),
-            ).fetchall()
+            if cached_candidates is not None:
+                candidates = list(cached_candidates)
+            else:
+                candidates = connection.execute(
+                    """
+                    SELECT id, com_number, form, requires_forming, nested_on, build_date, normalized_rev_key
+                    FROM part_attributes
+                    WHERE part_number = ?
+                    ORDER BY id
+                    """,
+                    (row["part_number"],),
+                ).fetchall()
             selected_candidates = candidates
             if len(candidates) == 1:
                 matched = candidates[0]
@@ -981,7 +1140,11 @@ def _resolve_with_part_attributes(connection: sqlite3.Connection, row: sqlite3.R
     }
 
 
-def _collect_job_candidates(connection: sqlite3.Connection, nest_rows: list[sqlite3.Row]) -> tuple[int | None, dict[int, dict[str, Any]]]:
+def _collect_job_candidates(
+    connection: sqlite3.Connection,
+    nest_rows: list[sqlite3.Row],
+    resolution_cache: dict[str, Any] | None = None,
+) -> tuple[int | None, dict[int, dict[str, Any]]]:
     candidates: dict[int, dict[str, Any]] = {}
 
     def ensure(job_row: sqlite3.Row) -> dict[str, Any]:
@@ -1000,26 +1163,30 @@ def _collect_job_candidates(connection: sqlite3.Connection, nest_rows: list[sqli
         return info
 
     for nest_row in nest_rows:
-        part_rows = connection.execute(
-            """
-            SELECT jp.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name
-            FROM job_parts jp
-            JOIN job_folders jf ON jf.id = jp.job_folder_id
-            WHERE jp.part_number = ?
-            ORDER BY jp.id
-            """,
-            (nest_row["part_number"],),
-        ).fetchall()
-        label_rows = connection.execute(
-            """
-            SELECT jl.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name, jl.job_folder_id
-            FROM job_labels jl
-            JOIN job_folders jf ON jf.id = jl.job_folder_id
-            WHERE jl.part_number = ?
-            ORDER BY jl.id
-            """,
-            (nest_row["part_number"],),
-        ).fetchall()
+        if resolution_cache is not None:
+            part_rows = resolution_cache["job_parts_by_part_number"].get(str(nest_row["part_number"] or ""), [])
+            label_rows = resolution_cache["job_labels_by_part_number"].get(str(nest_row["part_number"] or ""), [])
+        else:
+            part_rows = connection.execute(
+                """
+                SELECT jp.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name
+                FROM job_parts jp
+                JOIN job_folders jf ON jf.id = jp.job_folder_id
+                WHERE jp.part_number = ?
+                ORDER BY jp.id
+                """,
+                (nest_row["part_number"],),
+            ).fetchall()
+            label_rows = connection.execute(
+                """
+                SELECT jl.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name, jl.job_folder_id
+                FROM job_labels jl
+                JOIN job_folders jf ON jf.id = jl.job_folder_id
+                WHERE jl.part_number = ?
+                ORDER BY jl.id
+                """,
+                (nest_row["part_number"],),
+            ).fetchall()
 
         for job_row in part_rows:
             info = ensure(job_row)
@@ -1070,17 +1237,25 @@ def _collect_job_candidates(connection: sqlite3.Connection, nest_rows: list[sqli
     return int(ranked[0][0]), candidates
 
 
-def _select_best_job_part(connection: sqlite3.Connection, nest_row: sqlite3.Row, job_folder_id: int) -> sqlite3.Row | None:
-    candidates = connection.execute(
-        """
-        SELECT jp.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name
-        FROM job_parts jp
-        JOIN job_folders jf ON jf.id = jp.job_folder_id
-        WHERE jp.job_folder_id = ? AND jp.part_number = ?
-        ORDER BY jp.id
-        """,
-        (job_folder_id, nest_row["part_number"]),
-    ).fetchall()
+def _select_best_job_part(
+    connection: sqlite3.Connection,
+    nest_row: sqlite3.Row,
+    job_folder_id: int,
+    resolution_cache: dict[str, Any] | None = None,
+) -> sqlite3.Row | None:
+    if resolution_cache is not None:
+        candidates = resolution_cache["job_parts_by_job_and_part"].get((job_folder_id, str(nest_row["part_number"] or "")), [])
+    else:
+        candidates = connection.execute(
+            """
+            SELECT jp.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name
+            FROM job_parts jp
+            JOIN job_folders jf ON jf.id = jp.job_folder_id
+            WHERE jp.job_folder_id = ? AND jp.part_number = ?
+            ORDER BY jp.id
+            """,
+            (job_folder_id, nest_row["part_number"]),
+        ).fetchall()
     if not candidates:
         return None
 
@@ -1105,17 +1280,25 @@ def _select_best_job_part(connection: sqlite3.Connection, nest_row: sqlite3.Row,
     return sorted(candidates, key=score, reverse=True)[0]
 
 
-def _select_best_label(connection: sqlite3.Connection, nest_row: sqlite3.Row, job_folder_id: int) -> sqlite3.Row | None:
-    candidates = connection.execute(
-        """
-        SELECT jl.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name
-        FROM job_labels jl
-        JOIN job_folders jf ON jf.id = jl.job_folder_id
-        WHERE jl.job_folder_id = ? AND jl.part_number = ?
-        ORDER BY jl.id
-        """,
-        (job_folder_id, nest_row["part_number"]),
-    ).fetchall()
+def _select_best_label(
+    connection: sqlite3.Connection,
+    nest_row: sqlite3.Row,
+    job_folder_id: int,
+    resolution_cache: dict[str, Any] | None = None,
+) -> sqlite3.Row | None:
+    if resolution_cache is not None:
+        candidates = resolution_cache["job_labels_by_job_and_part"].get((job_folder_id, str(nest_row["part_number"] or "")), [])
+    else:
+        candidates = connection.execute(
+            """
+            SELECT jl.*, jf.com_number, jf.build_date_code AS job_build_date, jf.folder_name
+            FROM job_labels jl
+            JOIN job_folders jf ON jf.id = jl.job_folder_id
+            WHERE jl.job_folder_id = ? AND jl.part_number = ?
+            ORDER BY jl.id
+            """,
+            (job_folder_id, nest_row["part_number"]),
+        ).fetchall()
     if not candidates:
         return None
 
@@ -1134,16 +1317,27 @@ def _select_best_label(connection: sqlite3.Connection, nest_row: sqlite3.Row, jo
     return sorted(candidates, key=score, reverse=True)[0]
 
 
-def _select_attribute_for_job(connection: sqlite3.Connection, nest_row: sqlite3.Row, job_row: sqlite3.Row) -> sqlite3.Row | None:
-    candidates = connection.execute(
-        """
-        SELECT id, com_number, form, requires_forming, nested_on, build_date, normalized_rev_key
-        FROM part_attributes
-        WHERE part_number = ? AND com_number = ?
-        ORDER BY id
-        """,
-        (nest_row["part_number"], job_row["com_number"]),
-    ).fetchall()
+def _select_attribute_for_job(
+    connection: sqlite3.Connection,
+    nest_row: sqlite3.Row,
+    job_row: sqlite3.Row,
+    resolution_cache: dict[str, Any] | None = None,
+) -> sqlite3.Row | None:
+    if resolution_cache is not None:
+        candidates = resolution_cache["part_attributes_by_part_and_com"].get(
+            (str(nest_row["part_number"] or ""), job_row["com_number"]),
+            [],
+        )
+    else:
+        candidates = connection.execute(
+            """
+            SELECT id, com_number, form, requires_forming, nested_on, build_date, normalized_rev_key
+            FROM part_attributes
+            WHERE part_number = ? AND com_number = ?
+            ORDER BY id
+            """,
+            (nest_row["part_number"], job_row["com_number"]),
+        ).fetchall()
     if not candidates:
         return None
 
@@ -1163,6 +1357,7 @@ def _select_attribute_for_job(connection: sqlite3.Connection, nest_row: sqlite3.
 
 def rebuild_resolved_nest_parts(connection: sqlite3.Connection) -> None:
     connection.execute("DELETE FROM resolved_nest_parts")
+    resolution_cache = _build_resolution_cache(connection)
 
     nest_rows = connection.execute(
         """
@@ -1187,27 +1382,150 @@ def rebuild_resolved_nest_parts(connection: sqlite3.Connection) -> None:
         grouped[int(row["nest_id"])].append(row)
 
     for nest_id, part_rows in grouped.items():
-        selected_job_id, job_candidates = _collect_job_candidates(connection, part_rows)
+        selected_job_id, job_candidates = _collect_job_candidates(connection, part_rows, resolution_cache)
         selected_job_row = None
         selected_job_score = 0
         if selected_job_id is not None:
-            selected_job_row = connection.execute(
-                "SELECT * FROM job_folders WHERE id = ?",
-                (selected_job_id,),
-            ).fetchone()
+            selected_job_row = resolution_cache["job_folders_by_id"].get(selected_job_id)
+            if selected_job_row is None:
+                selected_job_row = connection.execute(
+                    "SELECT * FROM job_folders WHERE id = ?",
+                    (selected_job_id,),
+                ).fetchone()
             selected_job_score = int(job_candidates[selected_job_id]["score"])
 
         candidate_rows_for_metadata = [info["job_row"] for info in job_candidates.values()] if job_candidates else []
         base_candidate_count, base_build_dates, base_com_numbers = _candidate_metadata_from_rows(candidate_rows_for_metadata)
 
         for row in part_rows:
-            result = _resolve_with_part_attributes(connection, row)
+            result = _resolve_with_part_attributes(connection, row, resolution_cache)
             if selected_job_row is not None:
                 assert selected_job_id is not None
-                matched_job_part = _select_best_job_part(connection, row, selected_job_id)
-                matched_label = _select_best_label(connection, row, selected_job_id)
+                matched_job_part = _select_best_job_part(connection, row, selected_job_id, resolution_cache)
+                matched_label = _select_best_label(connection, row, selected_job_id, resolution_cache)
                 if matched_job_part or matched_label:
-                    attribute_match = _select_attribute_for_job(connection, row, selected_job_row)
+                    attribute_match = _select_attribute_for_job(connection, row, selected_job_row, resolution_cache)
+                    evidence = {
+                        "job_folder": selected_job_row["folder_name"],
+                        "job_com_number": selected_job_row["com_number"],
+                        "job_build_date": selected_job_row["build_date_code"],
+                        "job_part_source": matched_job_part["source_type"] if matched_job_part else None,
+                        "label_nest_name": matched_label["nest_name"] if matched_label else None,
+                    }
+                    result = {
+                        "com_number": selected_job_row["com_number"],
+                        "form_value": attribute_match["form"] if attribute_match else None,
+                        "requires_forming": attribute_match["requires_forming"] if attribute_match else None,
+                        "nested_on": matched_job_part["nested_on"] if matched_job_part else (attribute_match["nested_on"] if attribute_match else None),
+                        "resolution_status": "resolved" if matched_job_part else "partial",
+                        "resolution_rule": "job_context" if matched_job_part else "job_context_label_only",
+                        "match_candidate_count": base_candidate_count,
+                        "match_build_dates": base_build_dates,
+                        "match_com_numbers": base_com_numbers,
+                        "matched_part_attribute_id": attribute_match["id"] if attribute_match else None,
+                        "matched_job_folder_id": selected_job_id,
+                        "matched_job_part_id": matched_job_part["id"] if matched_job_part else None,
+                        "job_match_score": selected_job_score,
+                        "evidence_summary": json.dumps(evidence),
+                    }
+
+            connection.execute(
+                """
+                INSERT INTO resolved_nest_parts (
+                    nest_id, nest_part_id, barcode_filename, build_date_code, order_number_raw,
+                    part_number, part_revision, quantity_nested, com_number, form_value,
+                    requires_forming, nested_on, resolution_status, resolution_rule,
+                    match_candidate_count, match_build_dates, match_com_numbers,
+                    matched_job_folder_id, matched_job_part_id, job_match_score, evidence_summary,
+                    matched_part_attribute_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    nest_id,
+                    row["nest_part_id"],
+                    row["barcode_filename"],
+                    row["build_date_code"],
+                    row["order_number_raw"],
+                    row["part_number"],
+                    row["part_revision"],
+                    row["quantity_nested"],
+                    result["com_number"],
+                    result["form_value"],
+                    result["requires_forming"],
+                    result["nested_on"],
+                    result["resolution_status"],
+                    result["resolution_rule"],
+                    result["match_candidate_count"],
+                    result["match_build_dates"],
+                    result["match_com_numbers"],
+                    result["matched_job_folder_id"],
+                    result["matched_job_part_id"],
+                    result["job_match_score"],
+                    result["evidence_summary"],
+                    result["matched_part_attribute_id"],
+                ),
+            )
+
+
+def resolve_nest_parts_for_ids(connection: sqlite3.Connection, nest_ids: list[int]) -> None:
+    unique_nest_ids = sorted({int(nest_id) for nest_id in nest_ids if int(nest_id) > 0})
+    if not unique_nest_ids:
+        return
+
+    placeholders = ",".join("?" for _ in unique_nest_ids)
+    connection.execute(
+        f"DELETE FROM resolved_nest_parts WHERE nest_id IN ({placeholders})",
+        unique_nest_ids,
+    )
+    resolution_cache = _build_resolution_cache(connection)
+    nest_rows = connection.execute(
+        f"""
+        SELECT
+            pn.id AS nest_id,
+            pn.barcode_filename,
+            pn.program_date,
+            pn.build_date_code,
+            pn.order_number_raw,
+            np.id AS nest_part_id,
+            np.part_number,
+            np.part_revision,
+            np.quantity_nested
+        FROM program_nests pn
+        JOIN nest_parts np ON np.nest_id = pn.id
+        WHERE pn.id IN ({placeholders})
+        ORDER BY pn.id, np.part_number, np.id
+        """,
+        unique_nest_ids,
+    ).fetchall()
+
+    grouped: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for row in nest_rows:
+        grouped[int(row["nest_id"])] .append(row)
+
+    for nest_id, part_rows in grouped.items():
+        selected_job_id, job_candidates = _collect_job_candidates(connection, part_rows, resolution_cache)
+        selected_job_row = None
+        selected_job_score = 0
+        if selected_job_id is not None:
+            selected_job_row = resolution_cache["job_folders_by_id"].get(selected_job_id)
+            if selected_job_row is None:
+                selected_job_row = connection.execute(
+                    "SELECT * FROM job_folders WHERE id = ?",
+                    (selected_job_id,),
+                ).fetchone()
+            selected_job_score = int(job_candidates[selected_job_id]["score"])
+
+        candidate_rows_for_metadata = [info["job_row"] for info in job_candidates.values()] if job_candidates else []
+        base_candidate_count, base_build_dates, base_com_numbers = _candidate_metadata_from_rows(candidate_rows_for_metadata)
+
+        for row in part_rows:
+            result = _resolve_with_part_attributes(connection, row, resolution_cache)
+            if selected_job_row is not None:
+                assert selected_job_id is not None
+                matched_job_part = _select_best_job_part(connection, row, selected_job_id, resolution_cache)
+                matched_label = _select_best_label(connection, row, selected_job_id, resolution_cache)
+                if matched_job_part or matched_label:
+                    attribute_match = _select_attribute_for_job(connection, row, selected_job_row, resolution_cache)
                     evidence = {
                         "job_folder": selected_job_row["folder_name"],
                         "job_com_number": selected_job_row["com_number"],
@@ -1274,6 +1592,7 @@ def _scan_supported_files(
     roots: list[Path],
     *,
     changed_since: datetime | None,
+    processed_paths: set[str],
     progress_callback: ProgressCallback | None,
 ) -> tuple[list[tuple[Path, str]], int, int]:
     cache = load_scan_cache()
@@ -1308,6 +1627,7 @@ def _scan_supported_files(
             recursive=should_scan_recursively(root),
             now=now,
             changed_since=changed_since,
+            processed_paths=processed_paths,
             deferred_paths=deferred_paths,
             next_deferred=next_deferred,
             cache_node=cached_roots.get(str(root).casefold()),
@@ -1349,11 +1669,15 @@ def _scan_supported_files(
         normalized_path = str(path).casefold()
         if normalized_path in seen or is_ignored_source_path(path):
             continue
+        if is_immutable_source_path(path) and normalized_path in processed_paths:
+            continue
         file_type = classify_file(path)
         if file_type is None:
             continue
         stat = _safe_stat(path)
         if stat is None:
+            if is_immutable_source_path(path):
+                raise SourceAccessError(f"Lost access to P drive while rechecking deferred file: {path}")
             continue
         recent_enough = is_recent_enough(path, now)
         if recent_enough is None or not recent_enough:
@@ -1376,11 +1700,14 @@ def import_paths(
 ) -> dict[str, int]:
     with get_connection() as connection:
         create_schema(connection)
+        processed_paths = load_processed_paths(connection)
         discovered, unstable_recent_files, filtered_old_files = _scan_supported_files(
             roots,
             changed_since=changed_since,
+            processed_paths=processed_paths,
             progress_callback=progress_callback,
         )
+        imported_nest_ids: list[int] = []
 
         counts = {
             "processed": 0,
@@ -1463,7 +1790,18 @@ def import_paths(
                 counts["missing_files"] += 1
             current_step += 1
 
-        for _, candidates in sorted(grouped_dat_files.items()):
+        for barcode_filename, candidates in sorted(grouped_dat_files.items()):
+            current_source = _current_program_source(connection, barcode_filename)
+            if current_source is not None:
+                emit("Importing DAT files", f"Skipping {barcode_filename} (already imported)", current_source)
+                counts["skipped"] += 1
+                counts["unchanged_skipped"] += 1
+                for candidate in candidates[1:]:
+                    counts["skipped"] += 1
+                    counts["duplicate_candidate_skipped"] += 1
+                current_step += 1
+                continue
+
             try:
                 selected_path, _reason = _select_best_dat_candidate(connection, candidates)
             except FileNotFoundError:
@@ -1474,15 +1812,12 @@ def import_paths(
                 continue
             emit("Importing DAT files", f"Importing {selected_path.name}", str(selected_path))
             try:
-                current_source = _current_program_source(connection, selected_path.name)
-                needs_import = (
-                    current_source is None
-                    or not _same_path(current_source, str(selected_path))
-                    or should_process_file(connection, selected_path)
-                )
+                needs_import = should_process_file(connection, selected_path)
 
                 if needs_import:
-                    import_file(connection, selected_path, roots)
+                    imported_nest_id = import_file(connection, selected_path, roots)
+                    if imported_nest_id is not None:
+                        imported_nest_ids.append(imported_nest_id)
                     counts["processed"] += 1
                 else:
                     counts["skipped"] += 1
@@ -1498,11 +1833,11 @@ def import_paths(
                     counts["duplicate_candidate_skipped"] += 1
             current_step += 1
 
-        if counts["processed"] > 0:
-            emit("Resolving parts", "Rebuilding resolved part matches")
-            rebuild_resolved_nest_parts(connection)
+        if imported_nest_ids:
+            emit("Resolving parts", f"Resolving {len(imported_nest_ids)} newly imported nests")
+            resolve_nest_parts_for_ids(connection, imported_nest_ids)
         else:
-            emit("Resolving parts", "No source files changed; skipping resolved part rebuild")
+            emit("Resolving parts", "No new DAT files imported; skipping resolved part rebuild")
         current_step += 1
 
         connection.commit()

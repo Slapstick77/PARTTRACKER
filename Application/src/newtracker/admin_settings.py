@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import threading
 import time
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, cast
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from .db import APP_ROOT, get_connection
-from .importer import clear_scan_cache, import_paths
+from .importer import clear_scan_cache, import_paths, is_immutable_source_path
+from .persistence import atomic_write_json, atomic_write_text, read_json_file
 from .schema import create_schema
 from .ui_state import UiStateStore
 
 ADMIN_SETTINGS_PATH = APP_ROOT / "data" / "admin_settings.json"
 IMPORT_ERROR_LOG_PATH = APP_ROOT / "data" / "import_error.log"
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "password"
+LEGACY_ADMIN_USERNAME = "admin"
+LEGACY_ADMIN_PASSWORD = "password"
 
 DEFAULT_SOURCE_FOLDERS = {
     "amada": {
@@ -64,6 +68,8 @@ class AdminSettingsStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self.write(self._default_state())
+        else:
+            self.write(self.read())
         if _IMPORT_MONITOR_STATE is None:
             _IMPORT_MONITOR_STATE = self._default_import_monitor()
 
@@ -126,22 +132,39 @@ class AdminSettingsStore:
             "missing_paths": [],
         }
 
+    @staticmethod
+    def _default_security_state() -> dict[str, Any]:
+        configured_username = os.getenv("NEWTRACKER_ADMIN_USERNAME", "").strip() or LEGACY_ADMIN_USERNAME
+        configured_password = os.getenv("NEWTRACKER_ADMIN_PASSWORD", "").strip() or LEGACY_ADMIN_PASSWORD
+        return {
+            "admin_username": configured_username,
+            "admin_password_hash": generate_password_hash(configured_password),
+            "secret_key": secrets.token_hex(32),
+            "password_is_temporary": configured_password == LEGACY_ADMIN_PASSWORD,
+        }
+
     def _default_state(self) -> dict[str, Any]:
         return {
             "poll_interval_minutes": 0,
             "folders": {key: dict(value) for key, value in DEFAULT_SOURCE_FOLDERS.items()},
             "last_import": self._default_run_result("No import has been run yet."),
+            "security": self._default_security_state(),
         }
 
     def read(self) -> dict[str, Any]:
         with _SETTINGS_LOCK:
             state = self._default_state()
             if self.path.exists():
-                saved = json.loads(self.path.read_text(encoding="utf-8"))
-                state.update({key: value for key, value in saved.items() if key != "folders"})
+                saved = read_json_file(self.path, self._default_state, quarantine_corrupt=True)
+                if not isinstance(saved, dict):
+                    return state
+                state.update({key: value for key, value in saved.items() if key not in {"folders", "security"}})
                 for folder_key, folder_value in saved.get("folders", {}).items():
                     if folder_key in state["folders"]:
                         state["folders"][folder_key].update(folder_value)
+                security = saved.get("security", {})
+                if isinstance(security, Mapping):
+                    state["security"].update(dict(security))
             return state
 
     def write(self, state: dict[str, Any]) -> None:
@@ -150,8 +173,55 @@ class AdminSettingsStore:
                 "poll_interval_minutes": state.get("poll_interval_minutes", 0),
                 "folders": state.get("folders", {}),
                 "last_import": state.get("last_import", self._default_state()["last_import"]),
+                "security": state.get("security", self._default_state()["security"]),
             }
-            self.path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
+            atomic_write_json(self.path, persisted)
+
+    def admin_username(self, state: dict[str, Any] | None = None) -> str:
+        current = state or self.read()
+        return str(current.get("security", {}).get("admin_username") or LEGACY_ADMIN_USERNAME)
+
+    def secret_key(self, state: dict[str, Any] | None = None) -> str:
+        current = state or self.read()
+        return str(current.get("security", {}).get("secret_key") or self._default_security_state()["secret_key"])
+
+    def password_is_temporary(self, state: dict[str, Any] | None = None) -> bool:
+        current = state or self.read()
+        return bool(current.get("security", {}).get("password_is_temporary", False))
+
+    def authenticate_admin(self, username: str, password: str, state: dict[str, Any] | None = None) -> bool:
+        current = state or self.read()
+        stored_username = self.admin_username(current)
+        stored_hash = str(current.get("security", {}).get("admin_password_hash") or "")
+        if username != stored_username or not stored_hash:
+            return False
+        return check_password_hash(stored_hash, password)
+
+    def update_security_from_form(self, form: Mapping[str, Any]) -> dict[str, Any]:
+        state = self.read()
+        current_password = str(form.get("current_password", ""))
+        if not self.authenticate_admin(self.admin_username(state), current_password, state):
+            raise AdminSettingsError("Current admin password is incorrect.")
+
+        new_username = str(form.get("admin_username", "")).strip() or self.admin_username(state)
+        new_password = str(form.get("new_password", ""))
+        confirm_password = str(form.get("confirm_password", ""))
+
+        if new_password and new_password != confirm_password:
+            raise AdminSettingsError("New admin passwords do not match.")
+        if new_password and len(new_password) < 8:
+            raise AdminSettingsError("New admin password must be at least 8 characters.")
+        if not new_username:
+            raise AdminSettingsError("Admin username cannot be blank.")
+        if not new_password and new_username == self.admin_username(state):
+            raise AdminSettingsError("Enter a new username or a new password.")
+
+        state["security"]["admin_username"] = new_username
+        if new_password:
+            state["security"]["admin_password_hash"] = generate_password_hash(new_password)
+            state["security"]["password_is_temporary"] = False
+        self.write(state)
+        return state
 
     def describe_sources(self, state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         current = state or self.read()
@@ -222,6 +292,167 @@ class AdminSettingsStore:
 
         self.write(state)
         return state
+
+    @staticmethod
+    def _encode_path_list(values: list[str]) -> str:
+        return json.dumps([str(value) for value in values])
+
+    @staticmethod
+    def _decode_path_list(raw_value: Any) -> list[str]:
+        if isinstance(raw_value, list):
+            return [str(value) for value in raw_value]
+        try:
+            parsed = json.loads(str(raw_value or "[]"))
+        except Exception:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(value) for value in parsed]
+
+    @classmethod
+    def _import_run_row_to_result(cls, row: Any) -> dict[str, Any]:
+        return {
+            "status": str(row["status"] or "idle"),
+            "trigger": str(row["trigger"] or "manual"),
+            "message": str(row["message"] or "No import has been run yet."),
+            "processed": int(row["processed"] or 0),
+            "skipped": int(row["skipped"] or 0),
+            "errors": int(row["errors"] or 0),
+            "missing_files": int(row["missing_files"] or 0),
+            "started_at": str(row["started_at"] or ""),
+            "completed_at": str(row["completed_at"] or ""),
+            "active_paths": cls._decode_path_list(row["active_paths_json"]),
+            "missing_paths": cls._decode_path_list(row["missing_paths_json"]),
+            "last_error": str(row["last_error"] or ""),
+        }
+
+    def begin_import_run(
+        self,
+        *,
+        trigger: str,
+        message: str,
+        started_at: str,
+        active_paths: list[str],
+        missing_paths: list[str],
+    ) -> int:
+        with get_connection() as connection:
+            create_schema(connection)
+            cursor = connection.execute(
+                """
+                INSERT INTO import_runs (
+                    trigger, status, message, started_at, active_paths_json, missing_paths_json
+                ) VALUES (?, 'running', ?, ?, ?, ?)
+                """,
+                (
+                    trigger,
+                    message,
+                    started_at,
+                    self._encode_path_list(active_paths),
+                    self._encode_path_list(missing_paths),
+                ),
+            )
+            connection.commit()
+        if cursor.lastrowid is None:
+            raise RuntimeError("Failed to create import run record.")
+        return int(cursor.lastrowid)
+
+    def finish_import_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        message: str,
+        started_at: str,
+        active_paths: list[str],
+        missing_paths: list[str],
+        last_error: str = "",
+        **stats: Any,
+    ) -> None:
+        with get_connection() as connection:
+            create_schema(connection)
+            connection.execute(
+                """
+                UPDATE import_runs
+                SET status = ?,
+                    message = ?,
+                    started_at = ?,
+                    completed_at = ?,
+                    active_paths_json = ?,
+                    missing_paths_json = ?,
+                    processed = ?,
+                    skipped = ?,
+                    errors = ?,
+                    missing_files = ?,
+                    total_supported_files = ?,
+                    nest_files = ?,
+                    dat_files = ?,
+                    dat_groups = ?,
+                    duplicate_dat_files = ?,
+                    filtered_old_files = ?,
+                    unstable_recent_files = ?,
+                    last_error = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    message,
+                    started_at,
+                    datetime.now().isoformat(timespec="seconds"),
+                    self._encode_path_list(active_paths),
+                    self._encode_path_list(missing_paths),
+                    int(stats.get("processed") or 0),
+                    int(stats.get("skipped") or 0),
+                    int(stats.get("errors") or 0),
+                    int(stats.get("missing_files") or 0),
+                    int(stats.get("total_supported_files") or 0),
+                    int(stats.get("nest_files") or 0),
+                    int(stats.get("dat_files") or 0),
+                    int(stats.get("dat_groups") or 0),
+                    int(stats.get("duplicate_dat_files") or 0),
+                    int(stats.get("filtered_old_files") or 0),
+                    int(stats.get("unstable_recent_files") or 0),
+                    last_error,
+                    run_id,
+                ),
+            )
+            connection.commit()
+
+    def latest_import_result(self, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        with get_connection() as connection:
+            create_schema(connection)
+            row = connection.execute(
+                "SELECT * FROM import_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row is not None:
+            return self._import_run_row_to_result(row)
+        current = state or self.read()
+        return dict(current.get("last_import", self._default_state()["last_import"]))
+
+    def mark_interrupted_import_runs(self) -> int:
+        with get_connection() as connection:
+            create_schema(connection)
+            running_rows = connection.execute(
+                "SELECT id, started_at, active_paths_json, missing_paths_json FROM import_runs WHERE status = 'running'"
+            ).fetchall()
+            if not running_rows:
+                return 0
+            interrupted_at = datetime.now().isoformat(timespec="seconds")
+            for row in running_rows:
+                connection.execute(
+                    """
+                    UPDATE import_runs
+                    SET status = 'interrupted',
+                        message = 'Import interrupted before completion.',
+                        completed_at = ?,
+                        last_error = 'Application stopped before the import completed.',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (interrupted_at, int(row["id"])),
+                )
+            connection.commit()
+        return len(running_rows)
 
     def update_import_monitor(self, **updates: Any) -> dict[str, Any]:
         global _IMPORT_MONITOR_STATE
@@ -363,16 +594,67 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str) -> dict[str, An
     started_at = datetime.now().isoformat(timespec="seconds")
     with _IMPORT_LOCK:
         state = store.read()
+        critical_missing_paths = [
+            str(folder["selected_path"])
+            for folder in store.describe_sources(state)
+            if folder.get("selected_path")
+            and not folder.get("exists")
+            and is_immutable_source_path(Path(str(folder["selected_path"])))
+        ]
         active_paths, missing_paths = store.get_active_paths(state)
         active_path_strings = [str(path) for path in active_paths]
+        run_id = store.begin_import_run(
+            trigger=trigger,
+            message="Preparing folder scan.",
+            started_at=started_at,
+            active_paths=active_path_strings,
+            missing_paths=missing_paths,
+        )
         store.start_import_monitor(
             trigger=trigger,
             active_paths=active_path_strings,
             missing_paths=missing_paths,
             started_at=started_at,
         )
+        if critical_missing_paths:
+            message = (
+                "Import aborted because required P-drive source folders are unavailable: "
+                + "; ".join(critical_missing_paths)
+            )
+            store.finish_import_run(
+                run_id,
+                status="error",
+                message=message,
+                started_at=started_at,
+                active_paths=active_path_strings,
+                missing_paths=missing_paths,
+                last_error=message,
+                errors=1,
+            )
+            store.finish_import_monitor(status="error", message=message, last_error=message)
+            store.record_import_result(
+                status="error",
+                trigger=trigger,
+                message=message,
+                processed=0,
+                skipped=0,
+                active_paths=active_path_strings,
+                missing_paths=missing_paths,
+                started_at=started_at,
+            )
+            raise AdminSettingsError(message)
         if not active_paths:
             message = "No active source folders are available. Save a valid test or production path first."
+            store.finish_import_run(
+                run_id,
+                status="error",
+                message=message,
+                started_at=started_at,
+                active_paths=[],
+                missing_paths=missing_paths,
+                last_error=message,
+                errors=1,
+            )
             store.finish_import_monitor(status="error", message=message, last_error=message)
             store.record_import_result(
                 status="error",
@@ -394,8 +676,17 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str) -> dict[str, An
             )
         except Exception as exc:
             trace_text = traceback.format_exc()
-            IMPORT_ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            IMPORT_ERROR_LOG_PATH.write_text(trace_text, encoding="utf-8")
+            atomic_write_text(IMPORT_ERROR_LOG_PATH, trace_text, encoding="utf-8")
+            store.finish_import_run(
+                run_id,
+                status="error",
+                message=f"Import failed: {exc}",
+                started_at=started_at,
+                active_paths=active_path_strings,
+                missing_paths=missing_paths,
+                last_error=trace_text,
+                errors=1,
+            )
             store.finish_import_monitor(
                 status="error",
                 message=f"Import failed: {exc}",
@@ -421,7 +712,9 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str) -> dict[str, An
         if counts.get("missing_skipped"):
             skipped_parts.append(f"{counts['missing_skipped']} missing or unavailable")
 
-        if skipped_parts:
+        if counts["processed"] == 0 and counts["skipped"] == 0:
+            message = "No new files found."
+        elif skipped_parts:
             message = f"Imported {counts['processed']} files and skipped {counts['skipped']} files ({'; '.join(skipped_parts)})."
         else:
             message = f"Imported {counts['processed']} files."
@@ -453,6 +746,15 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str) -> dict[str, An
             total_roots=len(active_path_strings),
             discovered_supported_files=counts["total_supported_files"],
         )
+        store.finish_import_run(
+            run_id,
+            status="success",
+            message=message,
+            started_at=started_at,
+            active_paths=active_path_strings,
+            missing_paths=missing_paths,
+            **counts,
+        )
 
         updated = store.record_import_result(
             status="success",
@@ -464,7 +766,7 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str) -> dict[str, An
             missing_paths=missing_paths,
             started_at=started_at,
         )
-        return updated["last_import"]
+        return store.latest_import_result(updated)
 
 
 def start_import_job(store: AdminSettingsStore, *, trigger: str) -> bool:
@@ -509,6 +811,7 @@ def clear_parsed_data() -> int:
             DELETE FROM job_folders;
             DELETE FROM missed_scans;
             DELETE FROM processed_files;
+            DELETE FROM import_runs;
             DELETE FROM sqlite_sequence WHERE name IN (
                 'scan_events',
                 'flat_scan_items',
@@ -525,15 +828,15 @@ def clear_parsed_data() -> int:
                 'job_parts',
                 'job_folders',
                 'missed_scans',
-                'processed_files'
+                'processed_files',
+                'import_runs'
             );
             """
         )
         connection.commit()
 
     clear_scan_cache()
-    ui_state = cast(Any, UiStateStore())
-    ui_state.clear_runtime_data()
+    UiStateStore.clear_all_persisted_state()
     return 1
 
 
@@ -542,7 +845,7 @@ def _is_auto_import_due(state: dict[str, Any]) -> bool:
     if interval_minutes <= 0:
         return False
 
-    completed_at = str(state.get("last_import", {}).get("completed_at", "")).strip()
+    completed_at = str(AdminSettingsStore().latest_import_result(state).get("completed_at", "")).strip()
     if not completed_at:
         return True
 
@@ -570,6 +873,7 @@ def ensure_import_monitor_started() -> None:
     with _MONITOR_LOCK:
         if _MONITOR_STARTED:
             return
+        AdminSettingsStore().mark_interrupted_import_runs()
         thread = threading.Thread(target=_monitor_loop, name="newtracker-import-monitor", daemon=True)
         thread.start()
         _MONITOR_STARTED = True

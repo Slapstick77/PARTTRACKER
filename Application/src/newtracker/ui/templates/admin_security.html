@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Admin Security</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
+  </head>
+  <body>
+    <main class="page-shell admin-page-shell">
+      <section class="top-panel admin-top-panel">
+        <div class="panel-title-row">
+          <div class="title-block">
+            <h1>Admin Security</h1>
+            <p class="muted">Manage the local admin username and password from this separate screen.</p>
+          </div>
+          <div class="header-actions">
+            <a href="{{ url_for('admin_home') }}" class="button-link">Back to Admin</a>
+            <a href="{{ url_for('admin_changelog') }}" class="button-link">View Changelog</a>
+            <form method="post" action="{{ url_for('admin_logout') }}">
+              <button type="submit" class="secondary">Log Out</button>
+            </form>
+          </div>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <div class="flash-stack">
+              {% for category, message in messages %}
+                <div class="flash {{ category }}">{{ message }}</div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+      </section>
+
+      <section class="bottom-panel admin-bottom-panel">
+        <article class="list-pane left-pane admin-settings-pane">
+          <div class="pane-header">
+            <div>
+              <p class="eyebrow">Admin login</p>
+              <h2>Update credentials</h2>
+            </div>
+          </div>
+
+          <section class="admin-action-card status-card">
+            <p class="muted">Current username {{ admin_username }}.</p>
+            {% if security.password_is_temporary %}
+            <p class="monitor-error">The admin password is still using the temporary bootstrap value.</p>
+            {% endif %}
+            <form method="post" action="{{ url_for('save_admin_security') }}" class="admin-settings-form">
+              <label class="settings-field short-field">
+                <span>Admin username</span>
+                <input name="admin_username" value="{{ admin_username }}" autocomplete="username">
+              </label>
+              <label class="settings-field short-field">
+                <span>Current password</span>
+                <input name="current_password" type="password" autocomplete="current-password">
+              </label>
+              <label class="settings-field short-field">
+                <span>New password</span>
+                <input name="new_password" type="password" autocomplete="new-password">
+              </label>
+              <label class="settings-field short-field">
+                <span>Confirm new password</span>
+                <input name="confirm_password" type="password" autocomplete="new-password">
+              </label>
+              <button type="submit">Save Security Settings</button>
+            </form>
+          </section>
+        </article>
+
+        <article class="list-pane right-pane admin-actions-pane">
+          <div class="pane-header">
+            <div>
+              <p class="eyebrow">Notes</p>
+              <h2>How it works</h2>
+            </div>
+          </div>
+
+          <section class="admin-action-card status-card">
+            <p class="muted">This screen is separate from the main admin page so the password form is not always visible during everyday use.</p>
+            <p class="muted">If you keep the bootstrap password, the app will continue to warn here and on the main admin page until you replace it.</p>
+            <p class="muted">Leave the new password blank if you only want to rename the admin username.</p>
+          </section>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

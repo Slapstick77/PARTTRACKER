@@ -454,6 +454,141 @@ button.secondary.danger {
   font-size: 0.85rem;
 }
 
+.changelog-pane {
+  border-radius: 0 0 24px 24px;
+}
+
+.list-full-pane.changelog-pane {
+  display: grid;
+  gap: 18px;
+}
+
+.changelog-hero,
+.changelog-entry-header,
+.changelog-section-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.changelog-intro {
+  background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 16px 18px;
+}
+
+.changelog-intro p:last-child {
+  margin-bottom: 0;
+}
+
+.changelog-entry-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.changelog-entry-card {
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 18px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.changelog-entry-card h3,
+.changelog-section-card h4 {
+  margin-bottom: 0;
+}
+
+.changelog-section-grid {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.changelog-section-card {
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 16px;
+}
+
+.changelog-meta-card,
+.changelog-count-pill {
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+.changelog-meta-card {
+  min-width: 92px;
+  padding: 10px 14px;
+  display: grid;
+  gap: 4px;
+  text-align: center;
+}
+
+.changelog-meta-card.compact {
+  min-width: 74px;
+  padding: 8px 12px;
+}
+
+.changelog-meta-card span {
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.changelog-meta-card strong {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.changelog-count-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  padding: 0.35rem 0.65rem;
+}
+
+.changelog-list {
+  margin: 12px 0 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 10px;
+}
+
+.changelog-list li {
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.changelog-pane code {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.9em;
+  background: #e2e8f0;
+  color: #0f172a;
+  border-radius: 8px;
+  padding: 0.1rem 0.4rem;
+}
+
+@media (max-width: 800px) {
+  .changelog-hero,
+  .changelog-entry-header,
+  .changelog-section-title-row {
+    flex-direction: column;
+  }
+
+  .changelog-meta-card,
+  .changelog-meta-card.compact {
+    min-width: 0;
+    width: fit-content;
+  }
+}
+
 .formed-list-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
