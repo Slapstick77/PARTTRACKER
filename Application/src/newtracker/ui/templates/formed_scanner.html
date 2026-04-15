@@ -15,7 +15,8 @@
             <p class="muted">Load DAT token → scan formed parts across multiple active DAT lists</p>
           </div>
           <div class="header-actions">
-            <a href="{{ url_for('completed_list') }}" class="button-link">View List</a>
+            <a href="{{ url_for('completed_list') }}" class="button-link">Completed List</a>
+            <a href="{{ url_for('monitor_dashboard') }}" class="button-link">Monitor</a>
             <a href="{{ url_for('admin_home') }}" class="button-link">Admin</a>
             <a href="{{ url_for('home') }}" class="button-link">Back to Main</a>
           </div>
@@ -24,6 +25,7 @@
         <div class="nav-tabs">
           <a href="{{ url_for('home') }}" class="nav-tab">Main Scanner</a>
           <a href="{{ url_for('formed_home') }}" class="nav-tab active">Formed Scanner</a>
+          <a href="{{ url_for('monitor_dashboard') }}" class="nav-tab">Monitor Dashboard</a>
         </div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}

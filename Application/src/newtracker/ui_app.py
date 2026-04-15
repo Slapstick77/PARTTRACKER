@@ -136,7 +136,12 @@ def create_ui_app() -> Flask:
             "summary": summary,
             "expected_parts": store.expected_remaining_list(state),
             "scanned_parts": store.scanned_counts(state),
-            "can_complete": (not state.get("review_mode")) and summary["remaining_total"] == 0 and summary["scanned_total"] > 0,
+            "can_complete": (
+                (not state.get("review_mode"))
+                and state.get("flat_scan_status") != "completed"
+                and summary["remaining_total"] == 0
+                and summary["scanned_total"] > 0
+            ),
             "can_force_complete": (not state.get("review_mode")) and bool(state.get("nest_data")) and summary["expected_total"] > 0,
             "review_mode": bool(state.get("review_mode")),
             "review_edit_mode": bool(state.get("review_edit_mode")),
@@ -163,6 +168,9 @@ def create_ui_app() -> Flask:
 
     def build_formed_context() -> dict:
         return store.formed_context()
+
+    def build_monitor_context() -> dict:
+        return store.monitor_context()
 
     def load_changelog() -> dict[str, str]:
         if not CHANGELOG_PATH.exists():
@@ -194,6 +202,10 @@ def create_ui_app() -> Flask:
     @app.get("/formed")
     def formed_home():
         return render_template("formed_scanner.html", **build_formed_context())
+
+    @app.get("/monitor")
+    def monitor_dashboard():
+        return render_template("monitor_dashboard.html", **build_monitor_context())
 
     @app.post("/formed/scan-dat")
     def formed_scan_dat():
@@ -355,6 +367,12 @@ def create_ui_app() -> Flask:
     def clear_session_data():
         store.clear_session_data()
         flash("Session data cleared.", "success")
+        return redirect(url_for("home"))
+
+    @app.post("/clear-progress")
+    def clear_progress():
+        store.clear_development_progress()
+        flash("Development progress cleared. Monitor, in-progress scan state, and archived lists were reset.", "success")
         return redirect(url_for("home"))
 
     @app.get("/completed-list")

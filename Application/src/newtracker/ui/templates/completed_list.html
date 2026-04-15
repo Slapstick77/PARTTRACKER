@@ -16,9 +16,10 @@
           </div>
           <div class="header-actions">
             <a href="{{ url_for('home') }}" class="button-link">Back to Scanner</a>
+            <a href="{{ url_for('monitor_dashboard') }}" class="button-link">Monitor</a>
             <a href="{{ url_for('admin_home') }}" class="button-link">Admin</a>
             <form method="post" action="{{ url_for('clear_completed') }}">
-              <button type="submit" class="secondary danger">Clear List</button>
+              <button type="submit" class="secondary danger">Clear Completed List</button>
             </form>
           </div>
         </div>

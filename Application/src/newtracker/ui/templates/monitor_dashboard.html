@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>COM Monitor Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
+  </head>
+  <body>
+    <main class="page-shell monitor-page-shell">
+      <section class="top-panel monitor-top-panel">
+        <div class="panel-title-row">
+          <div class="title-block">
+            <h1>COM Monitor Dashboard</h1>
+            <p class="muted">Scanning a DAT starts monitoring for the full COM unit, not just the currently visible nest.</p>
+            <p class="muted">This page refreshes every 15 seconds to keep unit progress current.</p>
+          </div>
+          <div class="header-actions">
+            <a href="{{ url_for('home') }}" class="button-link">Main Scanner</a>
+            <a href="{{ url_for('formed_home') }}" class="button-link">Formed Scanner</a>
+            <a href="{{ url_for('completed_list') }}" class="button-link">Completed List</a>
+            <a href="{{ url_for('admin_home') }}" class="button-link">Admin</a>
+          </div>
+        </div>
+
+        <div class="nav-tabs">
+          <a href="{{ url_for('home') }}" class="nav-tab">Main Scanner</a>
+          <a href="{{ url_for('formed_home') }}" class="nav-tab">Formed Scanner</a>
+          <a href="{{ url_for('monitor_dashboard') }}" class="nav-tab active">Monitor Dashboard</a>
+        </div>
+
+        <div class="monitor-stat-grid">
+          <article class="monitor-stat-card">
+            <span>Units In Progress</span>
+            <strong>{{ summary.units_in_progress }}</strong>
+          </article>
+          <article class="monitor-stat-card">
+            <span>Total Parts In Progress</span>
+            <strong>{{ summary.parts_in_progress }}</strong>
+          </article>
+          <article class="monitor-stat-card">
+            <span>Waiting To Get Formed</span>
+            <strong>{{ summary.parts_waiting_forming }}</strong>
+          </article>
+          <article class="monitor-stat-card">
+            <span>Parts Formed</span>
+            <strong>{{ summary.parts_formed }}</strong>
+          </article>
+        </div>
+      </section>
+
+      <section class="monitor-dashboard-panel">
+        {% if units %}
+          <div class="monitor-unit-grid">
+            {% for unit in units %}
+              <article class="monitor-unit-card {% if unit.is_complete %}complete{% endif %}">
+                <div class="monitor-unit-header">
+                  <div>
+                    <p class="eyebrow">COM unit</p>
+                    <h2>COM# {{ unit.com_number }}</h2>
+                    <p class="muted">Started {{ unit.started_at or 'unknown' }}</p>
+                  </div>
+                  <span class="monitor-status-pill {% if unit.is_complete %}complete{% else %}active{% endif %}">{{ unit.status }}</span>
+                </div>
+
+                {% if unit.source_dats %}
+                <div class="monitor-pill-row">
+                  {% for dat_name in unit.source_dats %}
+                  <span class="monitor-source-pill">{{ dat_name }}</span>
+                  {% endfor %}
+                </div>
+                {% endif %}
+
+                <div class="monitor-metric-grid">
+                  <div class="monitor-metric-card">
+                    <span>Total Parts To Make</span>
+                    <strong>{{ unit.total_parts }}</strong>
+                  </div>
+                  <div class="monitor-metric-card">
+                    <span>Parts Made</span>
+                    <strong>{{ unit.flat_done }}</strong>
+                  </div>
+                  <div class="monitor-metric-card">
+                    <span>Total Parts To Form</span>
+                    <strong>{{ unit.total_forming }}</strong>
+                  </div>
+                  <div class="monitor-metric-card">
+                    <span>Parts Formed</span>
+                    <strong>{{ unit.forming_done }}</strong>
+                  </div>
+                  <div class="monitor-metric-card muted-card">
+                    <span>Distinct Parts</span>
+                    <strong>{{ unit.distinct_parts }}</strong>
+                  </div>
+                  <div class="monitor-metric-card muted-card">
+                    <span>DAT Files In Unit</span>
+                    <strong>{{ unit.dat_count }}</strong>
+                  </div>
+                </div>
+
+                <div class="monitor-progress-block">
+                  <div class="monitor-progress-title-row">
+                    <span>Unit completion progress</span>
+                    <strong>{{ unit.flat_done }} / {{ unit.total_parts }}</strong>
+                  </div>
+                  <div class="monitor-progress-track">
+                    <div class="monitor-progress-fill" style="width: {{ unit.flat_progress }}%"></div>
+                  </div>
+                  <p class="muted monitor-progress-note">{{ unit.remaining_parts }} parts still in progress for this COM.</p>
+                </div>
+
+                <div class="monitor-progress-block">
+                  <div class="monitor-progress-title-row">
+                    <span>Forming completion progress</span>
+                    <strong>{{ unit.forming_done }} / {{ unit.total_forming }}</strong>
+                  </div>
+                  <div class="monitor-progress-track forming-track">
+                    <div class="monitor-progress-fill forming-fill" style="width: {{ unit.forming_progress }}%"></div>
+                  </div>
+                  <p class="muted monitor-progress-note">{{ unit.waiting_forming }} parts are still waiting to get formed.</p>
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <article class="list-pane list-full-pane monitor-empty-pane">
+            <p class="empty-state">No COM units are being monitored yet. Scan a DAT on the main scanner to start a unit dashboard.</p>
+          </article>
+        {% endif %}
+      </section>
+    </main>
+
+    <script>
+      window.setTimeout(function () {
+        window.location.reload();
+      }, 15000);
+    </script>
+  </body>
+</html>

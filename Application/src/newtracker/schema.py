@@ -248,6 +248,23 @@ def create_schema(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (part_attribute_id) REFERENCES part_attributes(id) ON DELETE SET NULL
         );
 
+        CREATE TABLE IF NOT EXISTS monitor_units (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            com_number TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'in_progress',
+            started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_activity_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS monitor_unit_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            monitor_unit_id INTEGER NOT NULL,
+            barcode_filename TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (monitor_unit_id) REFERENCES monitor_units(id) ON DELETE CASCADE,
+            UNIQUE (monitor_unit_id, barcode_filename)
+        );
+
         CREATE TABLE IF NOT EXISTS scan_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
@@ -320,6 +337,15 @@ def create_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_forming_batch_items_lookup
             ON forming_batch_items(part_number, part_revision);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_forming_batch_items_batch_nest
+            ON forming_batch_items(forming_batch_id, nest_part_id);
+
+        CREATE INDEX IF NOT EXISTS idx_monitor_units_status_activity
+            ON monitor_units(status, last_activity_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_monitor_sources_barcode
+            ON monitor_unit_sources(barcode_filename);
 
         CREATE INDEX IF NOT EXISTS idx_processed_files_status
             ON processed_files(status, file_type);
@@ -426,5 +452,14 @@ def create_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_resolved_nest_parts_barcode
             ON resolved_nest_parts(barcode_filename, part_number);
+
+        CREATE INDEX IF NOT EXISTS idx_resolved_nest_parts_com_number
+            ON resolved_nest_parts(com_number, barcode_filename);
+
+        CREATE INDEX IF NOT EXISTS idx_flat_scan_items_nest_part
+            ON flat_scan_items(nest_part_id, scanned_quantity);
+
+        CREATE INDEX IF NOT EXISTS idx_forming_batch_items_nest_part
+            ON forming_batch_items(nest_part_id, scanned_quantity);
         """
     )

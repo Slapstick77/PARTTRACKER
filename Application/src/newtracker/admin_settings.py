@@ -796,6 +796,8 @@ def clear_parsed_data() -> int:
         connection.executescript(
             """
             DELETE FROM scan_events;
+            DELETE FROM monitor_unit_sources;
+            DELETE FROM monitor_units;
             DELETE FROM flat_scan_items;
             DELETE FROM flat_scan_sessions;
             DELETE FROM forming_batch_items;
@@ -814,6 +816,8 @@ def clear_parsed_data() -> int:
             DELETE FROM import_runs;
             DELETE FROM sqlite_sequence WHERE name IN (
                 'scan_events',
+                'monitor_unit_sources',
+                'monitor_units',
                 'flat_scan_items',
                 'flat_scan_sessions',
                 'forming_batch_items',

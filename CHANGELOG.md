@@ -44,6 +44,7 @@ This file tracks notable changes made to the NEWTRACKER application during activ
 - Added startup aborts when required P-drive source roots are unavailable before an import begins.
 - Added recovery for interrupted imports by marking stale `running` import rows as `interrupted` on app startup.
 - Moved the admin credential update form off the main admin page onto its own admin security screen.
+- Restored the completed-list page by adding the missing missed-scan list storage methods used by the route and clear action.
 
 ### Changed
 
@@ -53,6 +54,10 @@ This file tracks notable changes made to the NEWTRACKER application during activ
 - Admin login now uses persisted security settings with a stored password hash and persisted Flask secret key.
 - The development launcher keeps Flask debug enabled by default; the earlier debug-off change was reverted so existing dev behavior is preserved.
 - The admin changelog screen now renders structured release-note cards instead of a raw markdown text block.
+- The admin changelog screen now includes a print action with print-specific layout rules for paper or Save as PDF output.
+- DAT scans now create or reuse persisted flat-scan and forming progress records in SQLite, so unit progress is no longer tracked only in session JSON.
+- The COM monitor dashboard now reads started units and live progress from SQLite, making it shared across sessions instead of tied to one browser session.
+- Main scanner controls now distinguish between session reset, completed-list cleanup, and full development progress cleanup so in-progress SQL monitor state is not mistaken for the archived list.
 
 ### Added
 
@@ -61,6 +66,8 @@ This file tracks notable changes made to the NEWTRACKER application during activ
 - Added an `import_runs` SQLite table to track import lifecycle state, result summaries, and interrupted runs.
 - Added a dedicated admin security page for changing the local admin username and password.
 - Added a dedicated admin changelog page and admin-page links to this file.
+- Added a COM monitor dashboard page that starts tracking whole units when DAT files are scanned and shows per-unit part/forming progress.
+- Added a main-scanner `Clear Dev Progress` action that wipes SQL-backed scan/monitor progress while keeping imported part definitions intact.
 - Added this `CHANGELOG.md` file and backfilled the recent import, reliability, and admin UI fixes.
 
 ### Notes

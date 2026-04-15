@@ -16,6 +16,7 @@
             <p class="muted">Updated {{ changelog_updated or 'unknown' }}</p>
           </div>
           <div class="header-actions">
+            <button type="button" class="secondary" id="print-changelog-button">Print Changelog</button>
             <a href="{{ url_for('admin_home') }}" class="button-link">Back to Admin</a>
             <a href="{{ url_for('admin_security') }}" class="button-link">Security</a>
             <form method="post" action="{{ url_for('admin_logout') }}">
@@ -88,5 +89,11 @@
         </article>
       </section>
     </main>
+
+    <script>
+      document.getElementById("print-changelog-button")?.addEventListener("click", function () {
+        window.print();
+      });
+    </script>
   </body>
 </html>
