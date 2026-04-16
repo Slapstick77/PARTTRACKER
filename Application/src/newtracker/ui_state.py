@@ -16,7 +16,13 @@ LEGACY_COMPLETED_LIST_PATH = DATA_DIR / "completed_scan_list.json"
 LEGACY_MISSED_LIST_PATH = DATA_DIR / "missed_scan_list.json"
 UI_SESSION_DIR = DATA_DIR / "ui_sessions"
 LEGACY_MIGRATION_MARKER = UI_SESSION_DIR / ".legacy-migrated.json"
+PART_TRACKER_MIGRATION_MARKER = DATA_DIR / ".part-tracker-migrated.json"
 _UI_STATE_LOCK = threading.RLock()
+
+TRACKER_STAGE_PROG = "Prog"
+TRACKER_STAGE_CUT = "Cut"
+TRACKER_STAGE_FORMED = "Formed"
+TRACKER_STAGE_MISSING = "Missing"
 
 class UiStateError(ValueError):
     pass
@@ -32,6 +38,7 @@ class UiStateStore:
         self.missed_path = self.session_dir / "missed_scan_list.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_state_if_needed()
+        self._migrate_legacy_tracker_to_db_if_needed()
         if not self.path.exists():
             self.reset()
         if not self.completed_path.exists():
@@ -77,6 +84,8 @@ class UiStateStore:
         with _UI_STATE_LOCK:
             if UI_SESSION_DIR.exists():
                 shutil.rmtree(UI_SESSION_DIR, ignore_errors=True)
+            if PART_TRACKER_MIGRATION_MARKER.exists():
+                PART_TRACKER_MIGRATION_MARKER.unlink()
             for legacy_path in (LEGACY_UI_STATE_PATH, LEGACY_COMPLETED_LIST_PATH, LEGACY_MISSED_LIST_PATH):
                 if legacy_path.exists():
                     legacy_path.unlink()
@@ -90,9 +99,14 @@ class UiStateStore:
             "nest_data": "",
             "flat_scan_session_id": None,
             "flat_scan_status": "",
+            "current_run_number": 0,
+            "repeat_scan_pending": False,
+            "pending_repeat_dat": "",
+            "pending_repeat_run_number": None,
             "active_field": "machine_code",
             "expected_parts": [],
             "scanned_parts": [],
+            "scan_edit_mode": False,
             "message": "Enter or scan MACHINE",
             "message_level": "info",
             "formed_queue": [],
@@ -134,6 +148,636 @@ class UiStateStore:
         with _UI_STATE_LOCK:
             atomic_write_json(self.missed_path, rows)
 
+    @staticmethod
+    def _normalize_tracker_stage(stage: str | None, *, requires_forming: bool = False) -> str:
+        raw = str(stage or "").strip().lower()
+        if raw == TRACKER_STAGE_MISSING.lower():
+            return TRACKER_STAGE_MISSING
+        if raw == TRACKER_STAGE_FORMED.lower():
+            return TRACKER_STAGE_FORMED
+        if raw == TRACKER_STAGE_CUT.lower() or raw == "complete":
+            return TRACKER_STAGE_CUT
+        if raw == TRACKER_STAGE_PROG.lower() or raw == "in progress":
+            return TRACKER_STAGE_PROG
+        return TRACKER_STAGE_CUT if not raw and not requires_forming else TRACKER_STAGE_PROG
+
+    @staticmethod
+    def _tracker_stage_class(stage: str, requires_forming: bool) -> str:
+        normalized = UiStateStore._normalize_tracker_stage(stage, requires_forming=requires_forming)
+        if normalized == TRACKER_STAGE_MISSING:
+            return "stage-missing"
+        if normalized == TRACKER_STAGE_FORMED:
+            return "stage-formed"
+        if normalized == TRACKER_STAGE_CUT:
+            return "stage-cut-formed" if requires_forming else "stage-cut-complete"
+        return "stage-prog"
+
+    @staticmethod
+    def _history_group_key(dat_name: str, nest_part_id: int | None, sequence: int) -> str:
+        dat_token = str(dat_name or "").strip().upper()
+        nest_token = "legacy" if nest_part_id is None else str(int(nest_part_id))
+        return f"{dat_token}|{nest_token}|{int(sequence)}"
+
+    @staticmethod
+    def _history_signature(row: Any) -> tuple[Any, ...]:
+        return (
+            str(row["dat_name"] or ""),
+            int(row["run_number"] or 1),
+            int(row["scan_sequence"] or 1),
+            str(row["part_number"] or ""),
+            str(row["part_revision"] or "-"),
+            str(row["com_number"] or ""),
+            str(row["machine"] or ""),
+            str(row["user_code"] or ""),
+            str(row["location"] or ""),
+            int(row["requires_forming"] or 0),
+            str(row["stage"] or TRACKER_STAGE_PROG),
+        )
+
+    @staticmethod
+    def _history_event_label(event_type: str) -> str:
+        labels = {
+            "baseline": "Baseline",
+            "main_progress": "Main DAT Scan",
+            "main_complete": "Main Complete",
+            "main_force_complete": "Main Force Complete",
+            "main_force_missing": "Main Missing",
+            "formed_complete": "Formed Complete",
+            "formed_force_complete": "Formed Force Complete",
+            "formed_force_missing": "Formed Missing",
+        }
+        return labels.get(event_type, event_type.replace("_", " ").title())
+
+    def _record_tracker_history(
+        self,
+        connection,
+        tracker_keys: list[str],
+        *,
+        event_type: str,
+        scanner_name: str,
+        notes: str = "",
+    ) -> None:
+        unique_keys = [key for key in dict.fromkeys(str(key or "").strip() for key in tracker_keys) if key]
+        if not unique_keys:
+            return
+
+        placeholders = ",".join("?" for _ in unique_keys)
+        rows = connection.execute(
+            f"""
+            SELECT
+                tracker_key,
+                dat_name,
+                run_number,
+                nest_part_id,
+                scan_sequence,
+                part_number,
+                part_revision,
+                com_number,
+                machine,
+                user_code,
+                location,
+                requires_forming,
+                stage,
+                stage_updated_at,
+                updated_at,
+                created_at
+            FROM part_tracker_items
+            WHERE tracker_key IN ({placeholders})
+            """,
+            tuple(unique_keys),
+        ).fetchall()
+
+        inserts: list[tuple[Any, ...]] = []
+        for row in rows:
+            last_row = connection.execute(
+                """
+                SELECT
+                    dat_name,
+                    run_number,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    event_type,
+                    scanner_name
+                FROM part_tracker_history
+                WHERE tracker_key = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(row["tracker_key"]),),
+            ).fetchone()
+            if (
+                last_row is not None
+                and self._history_signature(last_row) == self._history_signature(row)
+                and str(last_row["event_type"] or "") == event_type
+                and str(last_row["scanner_name"] or "") == scanner_name
+            ):
+                continue
+
+            dat_name = str(row["dat_name"] or "")
+            nest_part_id = int(row["nest_part_id"]) if row["nest_part_id"] is not None else None
+            sequence = int(row["scan_sequence"] or 1)
+            inserts.append(
+                (
+                    str(row["tracker_key"]),
+                    self._history_group_key(dat_name, nest_part_id, sequence),
+                    event_type,
+                    scanner_name,
+                    dat_name,
+                    int(row["run_number"] or 1),
+                    nest_part_id,
+                    sequence,
+                    str(row["part_number"] or ""),
+                    str(row["part_revision"] or "-"),
+                    str(row["com_number"] or ""),
+                    str(row["machine"] or ""),
+                    str(row["user_code"] or ""),
+                    str(row["location"] or ""),
+                    1 if bool(row["requires_forming"]) else 0,
+                    str(row["stage"] or TRACKER_STAGE_PROG),
+                    str(row["stage_updated_at"] or row["updated_at"] or row["created_at"] or datetime.now().isoformat(timespec="seconds")),
+                    notes,
+                )
+            )
+
+        if inserts:
+            connection.executemany(
+                """
+                INSERT INTO part_tracker_history (
+                    tracker_key,
+                    history_group_key,
+                    event_type,
+                    scanner_name,
+                    dat_name,
+                    run_number,
+                    nest_part_id,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    recorded_at,
+                    notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                inserts,
+            )
+
+    @staticmethod
+    def _tracker_key(dat_name: str, run_number: int, nest_part_id: int | None, sequence: int) -> str:
+        dat_token = str(dat_name or "").strip().upper()
+        nest_token = "legacy" if nest_part_id is None else str(int(nest_part_id))
+        return f"{dat_token}|run{int(run_number)}|{nest_token}|{int(sequence)}"
+
+    @staticmethod
+    def _clear_repeat_scan_prompt(state: dict[str, Any]) -> None:
+        state["repeat_scan_pending"] = False
+        state["pending_repeat_dat"] = ""
+        state["pending_repeat_run_number"] = None
+
+    def _legacy_tracker_stage(self, row: dict[str, Any], default_stage: str) -> str:
+        requires_forming = bool(row.get("f_flag") or row.get("requires_forming"))
+        stage = str(row.get("stage") or default_stage or "").strip()
+        return self._normalize_tracker_stage(stage, requires_forming=requires_forming)
+
+    def _migrate_legacy_tracker_to_db_if_needed(self) -> None:
+        with _UI_STATE_LOCK:
+            if PART_TRACKER_MIGRATION_MARKER.exists():
+                return
+
+            source_specs: list[tuple[Path, str]] = []
+            if LEGACY_COMPLETED_LIST_PATH.exists():
+                source_specs.append((LEGACY_COMPLETED_LIST_PATH, TRACKER_STAGE_CUT))
+            if LEGACY_MISSED_LIST_PATH.exists():
+                source_specs.append((LEGACY_MISSED_LIST_PATH, TRACKER_STAGE_MISSING))
+            if UI_SESSION_DIR.exists():
+                for session_dir in UI_SESSION_DIR.iterdir():
+                    if not session_dir.is_dir():
+                        continue
+                    completed_path = session_dir / "completed_scan_list.json"
+                    missed_path = session_dir / "missed_scan_list.json"
+                    if completed_path.exists():
+                        source_specs.append((completed_path, TRACKER_STAGE_CUT))
+                    if missed_path.exists():
+                        source_specs.append((missed_path, TRACKER_STAGE_MISSING))
+
+            migrated_rows = 0
+            now = datetime.now().isoformat(timespec="seconds")
+            with get_connection() as connection:
+                create_schema(connection)
+                for source_path, default_stage in source_specs:
+                    payload = read_json_file(source_path, list, quarantine_corrupt=True)
+                    rows = payload if isinstance(payload, list) else []
+                    if not rows:
+                        continue
+
+                    params: list[tuple[Any, ...]] = []
+                    for index, raw_row in enumerate(rows):
+                        if not isinstance(raw_row, dict):
+                            continue
+                        stage = self._legacy_tracker_stage(raw_row, default_stage)
+                        requires_forming = 1 if bool(raw_row.get("f_flag") or raw_row.get("requires_forming")) else 0
+                        timestamp = str(
+                            raw_row.get("stage_updated_at")
+                            or raw_row.get("completed_at")
+                            or raw_row.get("updated_at")
+                            or raw_row.get("created_at")
+                            or now
+                        )
+                        tracker_key = f"legacy|{source_path.as_posix()}|{index}"
+                        params.append(
+                            (
+                                tracker_key,
+                                None,
+                                int(raw_row.get("run_number") or 1),
+                                str(raw_row.get("nest_data") or raw_row.get("dat_name") or ""),
+                                None,
+                                int(raw_row.get("sequence") or index + 1),
+                                str(raw_row.get("part_number") or ""),
+                                str(raw_row.get("part_revision") or "-"),
+                                str(raw_row.get("com_number") or ""),
+                                str(raw_row.get("machine") or ""),
+                                str(raw_row.get("user") or raw_row.get("user_code") or ""),
+                                str(raw_row.get("location") or ""),
+                                requires_forming,
+                                stage,
+                                timestamp,
+                                timestamp,
+                                timestamp,
+                            )
+                        )
+
+                    if not params:
+                        continue
+
+                    connection.executemany(
+                        """
+                        INSERT INTO part_tracker_items (
+                            tracker_key,
+                            flat_scan_session_id,
+                            run_number,
+                            dat_name,
+                            nest_part_id,
+                            scan_sequence,
+                            part_number,
+                            part_revision,
+                            com_number,
+                            machine,
+                            user_code,
+                            location,
+                            requires_forming,
+                            stage,
+                            stage_updated_at,
+                            created_at,
+                            updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(tracker_key) DO NOTHING
+                        """,
+                        params,
+                    )
+                    migrated_rows += len(params)
+
+                connection.commit()
+
+            atomic_write_json(
+                PART_TRACKER_MIGRATION_MARKER,
+                {
+                    "migrated_at": now,
+                    "rows": migrated_rows,
+                },
+            )
+
+    def _apply_state_defaults_to_parts(self, state: dict[str, Any]) -> None:
+        machine = str(state.get("machine_code") or "")
+        user_code = str(state.get("user_code") or "")
+        location = str(state.get("location_code") or "")
+        for key in ("expected_parts", "scanned_parts"):
+            normalized_parts: list[dict[str, Any]] = []
+            for raw_part in state.get(key, []):
+                part = dict(raw_part)
+                part.setdefault("machine", machine)
+                part.setdefault("user_code", user_code)
+                part.setdefault("location", location)
+                normalized_parts.append(part)
+            state[key] = normalized_parts
+
+    def _tracker_progress_rows(self, state: dict[str, Any]) -> list[tuple[Any, ...]]:
+        session_id = state.get("flat_scan_session_id")
+        now = datetime.now().isoformat(timespec="seconds")
+        params: list[tuple[Any, ...]] = []
+        for part in list(state.get("expected_parts", [])) + list(state.get("scanned_parts", [])):
+            dat_name = str(part.get("dat_name") or state.get("nest_data") or "").strip().upper()
+            nest_part_id = int(part["nest_part_id"])
+            sequence = int(part.get("sequence") or 1)
+            run_number = int(part.get("run_number") or state.get("current_run_number") or 1)
+            machine = str(part.get("machine") or state.get("machine_code") or "")
+            user_code = str(part.get("user_code") or state.get("user_code") or "")
+            location = str(part.get("location") or state.get("location_code") or "")
+            params.append(
+                (
+                    self._tracker_key(dat_name, run_number, nest_part_id, sequence),
+                    int(session_id) if session_id is not None else None,
+                    run_number,
+                    dat_name,
+                    nest_part_id,
+                    sequence,
+                    str(part.get("part_number") or ""),
+                    str(part.get("part_revision") or "-"),
+                    str(part.get("com_number") or ""),
+                    machine,
+                    user_code,
+                    location,
+                    1 if bool(part.get("requires_forming")) else 0,
+                    TRACKER_STAGE_PROG,
+                    now,
+                    now,
+                    now,
+                )
+            )
+        return params
+
+    def _sync_part_tracker_progress(self, state: dict[str, Any]) -> None:
+        params = self._tracker_progress_rows(state)
+        if not params:
+            return
+
+        with get_connection() as connection:
+            create_schema(connection)
+            connection.executemany(
+                """
+                INSERT INTO part_tracker_items (
+                    tracker_key,
+                    flat_scan_session_id,
+                    run_number,
+                    dat_name,
+                    nest_part_id,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    stage_updated_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tracker_key) DO UPDATE SET
+                    flat_scan_session_id = COALESCE(excluded.flat_scan_session_id, part_tracker_items.flat_scan_session_id),
+                    run_number = excluded.run_number,
+                    dat_name = excluded.dat_name,
+                    nest_part_id = COALESCE(excluded.nest_part_id, part_tracker_items.nest_part_id),
+                    scan_sequence = excluded.scan_sequence,
+                    part_revision = excluded.part_revision,
+                    requires_forming = excluded.requires_forming,
+                    part_number = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.part_number
+                        ELSE part_tracker_items.part_number
+                    END,
+                    com_number = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.com_number
+                        ELSE part_tracker_items.com_number
+                    END,
+                    machine = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.machine
+                        ELSE part_tracker_items.machine
+                    END,
+                    user_code = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.user_code
+                        ELSE part_tracker_items.user_code
+                    END,
+                    location = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.location
+                        ELSE part_tracker_items.location
+                    END,
+                    stage_updated_at = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.stage_updated_at
+                        ELSE part_tracker_items.stage_updated_at
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                params,
+            )
+            self._record_tracker_history(
+                connection,
+                [str(item[0]) for item in params],
+                event_type="main_progress",
+                scanner_name="main",
+                notes="Main DAT scan synchronized to tracker.",
+            )
+            connection.commit()
+
+    def _tracker_stage_rows(self, state: dict[str, Any], parts: list[dict[str, Any]], stage: str) -> list[tuple[Any, ...]]:
+        session_id = state.get("flat_scan_session_id")
+        now = datetime.now().isoformat(timespec="seconds")
+        params: list[tuple[Any, ...]] = []
+        for part in parts:
+            dat_name = str(part.get("dat_name") or state.get("nest_data") or "").strip().upper()
+            nest_part_id = int(part["nest_part_id"])
+            sequence = int(part.get("sequence") or 1)
+            run_number = int(part.get("run_number") or state.get("current_run_number") or 1)
+            machine = str(part.get("machine") or state.get("machine_code") or "")
+            user_code = str(part.get("user_code") or state.get("user_code") or "")
+            location = str(part.get("location") or state.get("location_code") or "")
+            params.append(
+                (
+                    self._tracker_key(dat_name, run_number, nest_part_id, sequence),
+                    int(session_id) if session_id is not None else None,
+                    run_number,
+                    dat_name,
+                    nest_part_id,
+                    sequence,
+                    str(part.get("part_number") or ""),
+                    str(part.get("part_revision") or "-"),
+                    str(part.get("com_number") or ""),
+                    machine,
+                    user_code,
+                    location,
+                    1 if bool(part.get("requires_forming")) else 0,
+                    stage,
+                    now,
+                    now,
+                    now,
+                )
+            )
+        return params
+
+    def _apply_tracker_stage(
+        self,
+        state: dict[str, Any],
+        parts: list[dict[str, Any]],
+        stage: str,
+        *,
+        event_type: str,
+        scanner_name: str,
+        notes: str = "",
+    ) -> int:
+        params = self._tracker_stage_rows(state, parts, stage)
+        if not params:
+            return 0
+
+        with get_connection() as connection:
+            create_schema(connection)
+            connection.executemany(
+                """
+                INSERT INTO part_tracker_items (
+                    tracker_key,
+                    flat_scan_session_id,
+                    run_number,
+                    dat_name,
+                    nest_part_id,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    stage_updated_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tracker_key) DO UPDATE SET
+                    flat_scan_session_id = COALESCE(excluded.flat_scan_session_id, part_tracker_items.flat_scan_session_id),
+                    run_number = excluded.run_number,
+                    dat_name = excluded.dat_name,
+                    nest_part_id = COALESCE(excluded.nest_part_id, part_tracker_items.nest_part_id),
+                    scan_sequence = excluded.scan_sequence,
+                    part_number = excluded.part_number,
+                    part_revision = excluded.part_revision,
+                    com_number = excluded.com_number,
+                    machine = excluded.machine,
+                    user_code = excluded.user_code,
+                    location = excluded.location,
+                    requires_forming = excluded.requires_forming,
+                    stage = excluded.stage,
+                    stage_updated_at = excluded.stage_updated_at,
+                    updated_at = excluded.updated_at
+                """,
+                params,
+            )
+            self._record_tracker_history(
+                connection,
+                [str(item[0]) for item in params],
+                event_type=event_type,
+                scanner_name=scanner_name,
+                notes=notes,
+            )
+            connection.commit()
+        return len(params)
+
+    def start_scan_edit(self) -> dict[str, Any]:
+        state = self.read()
+        if not state.get("nest_data"):
+            raise UiStateError("Scan NEST DATA before editing scanned parts.")
+        if not state.get("scanned_parts"):
+            raise UiStateError("Scan at least one part before editing the scanned list.")
+        state["scan_edit_mode"] = True
+        state["message"] = "Edit scanned part details, then click Done."
+        state["message_level"] = "info"
+        self.write(state)
+        return state
+
+    def save_scan_edits(self, form) -> dict[str, Any]:
+        state = self.read()
+        if not state.get("scan_edit_mode"):
+            return state
+
+        updated_parts: list[dict[str, Any]] = []
+        for index, raw_part in enumerate(state.get("scanned_parts", [])):
+            part = dict(raw_part)
+            part_number = str(form.get(f"scanned_{index}_part_number", part.get("part_number", "")) or "").strip()
+            com_number = str(form.get(f"scanned_{index}_com_number", part.get("com_number", "")) or "").strip()
+            location = str(form.get(f"scanned_{index}_location", part.get("location", state.get("location_code", ""))) or "").strip()
+            if not part_number:
+                raise UiStateError("Part number cannot be blank in edit mode.")
+            part["part_number"] = part_number
+            part["com_number"] = com_number
+            part["location"] = location
+            updated_parts.append(part)
+
+        state["scanned_parts"] = updated_parts
+        state["scan_edit_mode"] = False
+        state["message"] = "Scanned part edits saved to this browser session. Click Complete or Force Complete to submit them."
+        state["message_level"] = "success"
+        self.write(state)
+        return state
+
+    def _reset_after_batch_submission(self, state: dict[str, Any], message: str) -> dict[str, Any]:
+        reset_state = self._default_state()
+        reset_state["machine_code"] = state.get("machine_code", "")
+        reset_state["user_code"] = state.get("user_code", "")
+        reset_state["location_code"] = state.get("location_code", "")
+        reset_state["formed_queue"] = state.get("formed_queue", [])
+        reset_state["formed_active_lists"] = state.get("formed_active_lists", [])
+        reset_state["formed_active_field"] = state.get("formed_active_field", "dat_token")
+        reset_state["formed_message"] = state.get("formed_message", "Scan DAT token to load formed list")
+        reset_state["formed_message_level"] = state.get("formed_message_level", "info")
+        if reset_state["machine_code"] and reset_state["user_code"] and reset_state["location_code"]:
+            reset_state["active_field"] = "nest_data"
+        else:
+            reset_state["active_field"] = "machine_code"
+        reset_state["message"] = message
+        reset_state["message_level"] = "success"
+        self.write(reset_state)
+        return reset_state
+
+    def _tracker_row_payload(self, row: Any) -> dict[str, Any]:
+        requires_forming = bool(row["requires_forming"])
+        stage = self._normalize_tracker_stage(str(row["stage"] or ""), requires_forming=requires_forming)
+        run_number = int(row["run_number"] or 1)
+        latest_run_number = int(row["latest_run_number"] or run_number)
+        return {
+            "tracker_key": str(row["tracker_key"]),
+            "updated_at": str(row["stage_updated_at"] or row["updated_at"] or row["created_at"] or ""),
+            "run_number": run_number,
+            "run_class": "run-pill-latest" if run_number >= latest_run_number else "run-pill-older",
+            "machine": str(row["machine"] or ""),
+            "user": str(row["user_code"] or ""),
+            "location": str(row["location"] or ""),
+            "nest_data": str(row["dat_name"] or ""),
+            "part_number": str(row["part_number"] or ""),
+            "part_revision": str(row["part_revision"] or "-"),
+            "com_number": str(row["com_number"] or ""),
+            "f_flag": requires_forming,
+            "stage": stage,
+            "stage_class": self._tracker_stage_class(stage, requires_forming),
+        }
+
+    def _history_row_payload(self, row: Any) -> dict[str, Any]:
+        requires_forming = bool(row["requires_forming"])
+        stage = self._normalize_tracker_stage(str(row["stage"] or ""), requires_forming=requires_forming)
+        return {
+            "recorded_at": str(row["recorded_at"] or ""),
+            "event_label": self._history_event_label(str(row["event_type"] or "")),
+            "scanner_name": str(row["scanner_name"] or ""),
+            "run_number": int(row["run_number"] or 1),
+            "stage": stage,
+            "stage_class": self._tracker_stage_class(stage, requires_forming),
+            "part_number": str(row["part_number"] or ""),
+            "part_revision": str(row["part_revision"] or "-"),
+            "com_number": str(row["com_number"] or ""),
+            "machine": str(row["machine"] or ""),
+            "user": str(row["user_code"] or ""),
+            "location": str(row["location"] or ""),
+            "f_flag": requires_forming,
+            "notes": str(row["notes"] or ""),
+        }
+
     def reset(self) -> dict[str, Any]:
         previous = self.read() if self.path.exists() else self._default_state()
         state = self._default_state()
@@ -170,6 +814,48 @@ class UiStateStore:
         state["message_level"] = "info"
         self.write(state)
         return state
+
+    def _load_repeat_scan_info(self, connection, dat_name: str, rows: list[Any]) -> dict[str, Any]:
+        if not rows:
+            raise UiStateError(f"No resolved parts found for {dat_name}")
+
+        nest_id = int(rows[0]["nest_id"])
+        session_row = connection.execute(
+            """
+            SELECT id, status, COALESCE(run_number, 1) AS run_number
+            FROM flat_scan_sessions
+            WHERE nest_id = ?
+            ORDER BY COALESCE(run_number, 1) DESC, id DESC
+            LIMIT 1
+            """,
+            (nest_id,),
+        ).fetchone()
+        tracker_row = connection.execute(
+            """
+            SELECT COALESCE(MAX(run_number), 0) AS max_finalized_run
+            FROM part_tracker_items
+            WHERE UPPER(TRIM(dat_name)) = UPPER(TRIM(?))
+              AND stage IN ('Cut', 'Missing')
+            """,
+            (dat_name,),
+        ).fetchone()
+        max_finalized_run = int(tracker_row["max_finalized_run"] or 0) if tracker_row is not None else 0
+        if session_row is None:
+            return {
+                "has_completed_run": max_finalized_run > 0,
+                "next_run_number": max(1, max_finalized_run + 1),
+                "latest_status": "",
+            }
+
+        latest_status = str(session_row["status"] or "")
+        latest_run_number = int(session_row["run_number"] or 1)
+        latest_known_run = max(latest_run_number, max_finalized_run)
+        resumable_open_run = latest_status != "completed" and latest_run_number > max_finalized_run
+        return {
+            "has_completed_run": (latest_status == "completed") or (max_finalized_run > 0 and not resumable_open_run),
+            "next_run_number": latest_known_run + 1,
+            "latest_status": latest_status,
+        }
 
     def _load_resolved_rows_for_dat(
         self,
@@ -212,6 +898,27 @@ class UiStateStore:
             "requires_forming": bool(row["requires_forming"]),
             "sequence": sequence,
             "dat_name": row["barcode_filename"],
+        }
+        payload.update(extra)
+        return payload
+
+    @staticmethod
+    def _build_tracker_part_instance(row: Any, **extra: Any) -> dict[str, Any]:
+        payload = {
+            "tracker_key": str(row["tracker_key"]),
+            "flat_scan_session_id": int(row["flat_scan_session_id"]) if row["flat_scan_session_id"] is not None else None,
+            "run_number": int(row["run_number"] or 1),
+            "nest_part_id": int(row["nest_part_id"]),
+            "part_number": str(row["part_number"] or ""),
+            "part_revision": str(row["part_revision"] or "-"),
+            "com_number": str(row["com_number"] or ""),
+            "machine": str(row["machine"] or ""),
+            "user_code": str(row["user_code"] or ""),
+            "location": str(row["location"] or ""),
+            "requires_forming": bool(row["requires_forming"]),
+            "sequence": int(row["scan_sequence"] or 1),
+            "dat_name": str(row["dat_name"] or ""),
+            "stage": str(row["stage"] or TRACKER_STAGE_PROG),
         }
         payload.update(extra)
         return payload
@@ -276,20 +983,36 @@ class UiStateStore:
                     (status, activity_at, com_number),
                 )
 
-    def _ensure_flat_scan_session(self, connection, dat_name: str, rows: list[Any]) -> tuple[int, str]:
+    def _ensure_flat_scan_session(
+        self,
+        connection,
+        dat_name: str,
+        rows: list[Any],
+        *,
+        start_new_session: bool = False,
+        forced_run_number: int | None = None,
+    ) -> tuple[int, str, int]:
         if not rows:
             raise UiStateError(f"No resolved parts found for {dat_name}")
 
         nest_id = int(rows[0]["nest_id"])
         session_row = connection.execute(
-            "SELECT id, status FROM flat_scan_sessions WHERE nest_id = ? ORDER BY id DESC LIMIT 1",
+            """
+            SELECT id, status, COALESCE(run_number, 1) AS run_number
+            FROM flat_scan_sessions
+            WHERE nest_id = ?
+            ORDER BY COALESCE(run_number, 1) DESC, id DESC
+            LIMIT 1
+            """,
             (nest_id,),
         ).fetchone()
-        if session_row is None:
+        latest_run_number = int(session_row["run_number"] or 1) if session_row is not None else 0
+        if session_row is None or start_new_session:
             started_at = datetime.now().isoformat(timespec="seconds")
+            run_number = int(forced_run_number or (latest_run_number + 1) or 1)
             cursor = connection.execute(
-                "INSERT INTO flat_scan_sessions (nest_id, started_at, status) VALUES (?, ?, 'open')",
-                (nest_id, started_at),
+                "INSERT INTO flat_scan_sessions (nest_id, run_number, started_at, status) VALUES (?, ?, ?, 'open')",
+                (nest_id, run_number, started_at),
             )
             if cursor.lastrowid is None:
                 raise RuntimeError("Failed to create flat scan session.")
@@ -298,6 +1021,7 @@ class UiStateStore:
         else:
             session_id = int(session_row["id"])
             session_status = str(session_row["status"] or "open")
+            run_number = latest_run_number
 
         for row in rows:
             expected_quantity = max(1, int(row["quantity_nested"] or 0))
@@ -324,16 +1048,28 @@ class UiStateStore:
                 (session_id, int(row["nest_part_id"]), expected_quantity, requires_forming),
             )
 
-        return session_id, session_status
+        return session_id, session_status, run_number
 
-    def _load_flat_scan_snapshot(self, dat_name: str) -> dict[str, Any]:
+    def _load_flat_scan_snapshot(
+        self,
+        dat_name: str,
+        *,
+        start_new_session: bool = False,
+        forced_run_number: int | None = None,
+    ) -> dict[str, Any]:
         with get_connection() as connection:
             create_schema(connection)
             rows = self._load_resolved_rows_for_dat(connection, dat_name)
             if not rows:
                 raise UiStateError(f"No resolved parts found for {dat_name}")
             self._upsert_monitor_units(connection, rows, dat_name=dat_name)
-            session_id, session_status = self._ensure_flat_scan_session(connection, dat_name, rows)
+            session_id, session_status, run_number = self._ensure_flat_scan_session(
+                connection,
+                dat_name,
+                rows,
+                start_new_session=start_new_session,
+                forced_run_number=forced_run_number,
+            )
             item_rows = connection.execute(
                 "SELECT nest_part_id, expected_quantity, scanned_quantity FROM flat_scan_items WHERE flat_scan_session_id = ?",
                 (session_id,),
@@ -358,6 +1094,7 @@ class UiStateStore:
                         row,
                         sequence,
                         flat_scan_session_id=session_id,
+                        run_number=run_number,
                     )
                 )
             for sequence in range(scanned_quantity + 1, expected_quantity + 1):
@@ -366,15 +1103,39 @@ class UiStateStore:
                         row,
                         sequence,
                         flat_scan_session_id=session_id,
+                        run_number=run_number,
                     )
                 )
 
         return {
             "session_id": session_id,
             "status": session_status,
+            "run_number": run_number,
             "expected_parts": expected_parts,
             "scanned_parts": scanned_parts,
         }
+
+    def _apply_flat_scan_snapshot(self, state: dict[str, Any], dat_name: str, snapshot: dict[str, Any]) -> None:
+        state["nest_data"] = dat_name
+        state["update_target"] = ""
+        self._clear_repeat_scan_prompt(state)
+        state["flat_scan_session_id"] = snapshot["session_id"]
+        state["flat_scan_status"] = snapshot["status"]
+        state["current_run_number"] = int(snapshot.get("run_number") or 1)
+        state["expected_parts"] = list(snapshot["expected_parts"])
+        state["scanned_parts"] = list(snapshot["scanned_parts"])
+        state["scan_edit_mode"] = False
+        self._apply_state_defaults_to_parts(state)
+        self._sync_part_tracker_progress(state)
+        self._queue_formed_from_nest(state, dat_name)
+        if state["expected_parts"]:
+            state["active_field"] = "part_scan"
+            state["message"] = "Continue scanning parts" if state["scanned_parts"] else "Start scanning parts"
+            state["message_level"] = "info"
+        else:
+            state["active_field"] = "nest_data"
+            state["message"] = f"All parts already scanned for {dat_name}. Scan the next DAT."
+            state["message_level"] = "success"
 
     def _increment_flat_scan_item(self, flat_scan_session_id: int | None, part: dict[str, Any]) -> None:
         if flat_scan_session_id is None:
@@ -421,17 +1182,18 @@ class UiStateStore:
             self._touch_monitor_units(connection, [str(part.get("com_number") or "")])
             connection.commit()
 
-    def _ensure_forming_batch(self, connection, dat_name: str, rows: list[Any], *, mark_started: bool) -> tuple[int, str, str, str]:
+    def _ensure_forming_batch(self, connection, dat_name: str, rows: list[Any], *, mark_started: bool) -> tuple[int, str, str, str, int]:
         if not rows:
             raise UiStateError(f"No forming parts found for {dat_name}")
 
+        run_number = int(rows[0]["run_number"] or 1)
+        batch_code = f"{dat_name}|run{run_number}"
         batch_row = connection.execute(
             "SELECT id, status, created_at, started_at FROM forming_batches WHERE batch_code = ?",
-            (dat_name,),
+            (batch_code,),
         ).fetchone()
         if batch_row is None:
             com_numbers = self._extract_com_numbers_from_rows(rows)
-            build_date_code = str(rows[0]["build_date_code"] or "") or None
             cursor = connection.execute(
                 """
                 INSERT INTO forming_batches (
@@ -444,10 +1206,10 @@ class UiStateStore:
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    dat_name,
-                    int(rows[0]["nest_id"]),
+                    batch_code,
+                    None,
                     com_numbers[0] if len(com_numbers) == 1 else None,
-                    build_date_code,
+                    None,
                     "in_progress" if mark_started else "queued",
                     datetime.now().isoformat(timespec="seconds") if mark_started else None,
                 ),
@@ -464,8 +1226,13 @@ class UiStateStore:
             created_at = str(batch_row["created_at"] or "")
             started_at = str(batch_row["started_at"] or "")
 
+        rows_by_nest: dict[int, list[Any]] = {}
         for row in rows:
-            expected_quantity = max(1, int(row["quantity_nested"] or 0))
+            rows_by_nest.setdefault(int(row["nest_part_id"]), []).append(row)
+
+        for nest_part_id, grouped_rows in rows_by_nest.items():
+            reference_row = grouped_rows[0]
+            expected_quantity = len(grouped_rows)
             connection.execute(
                 """
                 INSERT INTO forming_batch_items (
@@ -491,10 +1258,10 @@ class UiStateStore:
                 """,
                 (
                     batch_id,
-                    int(row["nest_part_id"]),
-                    row["matched_part_attribute_id"],
-                    row["part_number"],
-                    row["part_revision"] or "-",
+                    nest_part_id,
+                    None,
+                    str(reference_row["part_number"] or ""),
+                    str(reference_row["part_revision"] or "-"),
                     expected_quantity,
                 ),
             )
@@ -508,19 +1275,26 @@ class UiStateStore:
             batch_status = "in_progress"
             started_at = started_value
 
-        return batch_id, batch_status, created_at, started_at
+        return batch_id, batch_status, created_at, started_at, run_number
 
     def _load_forming_batch_snapshot(self, dat_name: str, *, mark_started: bool = False) -> dict[str, Any] | None:
         with get_connection() as connection:
             create_schema(connection)
-            rows = self._load_resolved_rows_for_dat(connection, dat_name, requires_forming=True)
+            rows = self._load_latest_tracker_rows_for_dat(connection, dat_name, requires_forming_only=True)
             if not rows:
                 return None
+            ready_rows = [
+                row
+                for row in rows
+                if self._normalize_tracker_stage(str(row["stage"] or ""), requires_forming=True) == TRACKER_STAGE_CUT
+            ]
+            if not ready_rows:
+                return None
             self._upsert_monitor_units(connection, rows, dat_name=dat_name)
-            batch_id, batch_status, created_at, started_at = self._ensure_forming_batch(
+            batch_id, batch_status, created_at, started_at, run_number = self._ensure_forming_batch(
                 connection,
                 dat_name,
-                rows,
+                ready_rows,
                 mark_started=mark_started,
             )
             item_rows = connection.execute(
@@ -535,25 +1309,22 @@ class UiStateStore:
         }
         expected_parts: list[dict[str, Any]] = []
         scanned_parts: list[dict[str, Any]] = []
-        for row in rows:
-            item_row = items_by_nest.get(int(row["nest_part_id"]))
-            expected_quantity = max(1, int((item_row["expected_quantity"] if item_row is not None else row["quantity_nested"]) or 0))
+        rows_by_nest: dict[int, list[Any]] = {}
+        for row in ready_rows:
+            rows_by_nest.setdefault(int(row["nest_part_id"]), []).append(row)
+
+        for nest_part_id, grouped_rows in rows_by_nest.items():
+            grouped_rows.sort(key=lambda item: (int(item["scan_sequence"] or 1), str(item["part_number"] or "")))
+            item_row = items_by_nest.get(nest_part_id)
+            expected_quantity = len(grouped_rows)
             scanned_quantity = int(item_row["scanned_quantity"] or 0) if item_row is not None else 0
             scanned_quantity = max(0, min(scanned_quantity, expected_quantity))
 
-            for sequence in range(1, scanned_quantity + 1):
-                scanned_parts.append(
-                    self._build_part_instance(
+            for index, row in enumerate(grouped_rows, start=1):
+                target_list = scanned_parts if index <= scanned_quantity else expected_parts
+                target_list.append(
+                    self._build_tracker_part_instance(
                         row,
-                        sequence,
-                        forming_batch_id=batch_id,
-                    )
-                )
-            for sequence in range(scanned_quantity + 1, expected_quantity + 1):
-                expected_parts.append(
-                    self._build_part_instance(
-                        row,
-                        sequence,
                         forming_batch_id=batch_id,
                     )
                 )
@@ -561,42 +1332,30 @@ class UiStateStore:
         return {
             "batch_id": batch_id,
             "dat_name": dat_name,
+            "run_number": run_number,
             "status": batch_status,
             "queued_at": created_at,
             "loaded_at": started_at,
-            "com_numbers": self._extract_com_numbers_from_rows(rows),
+            "com_numbers": self._extract_com_numbers_from_rows(ready_rows),
             "expected_parts": expected_parts,
             "scanned_parts": scanned_parts,
         }
 
     def _apply_forming_snapshot_to_state(self, state: dict[str, Any], snapshot: dict[str, Any], *, mark_loaded: bool) -> None:
         dat_name = str(snapshot["dat_name"])
-        queue_entry = {
-            "dat_name": dat_name,
-            "queued_at": snapshot.get("queued_at") or datetime.now().isoformat(timespec="seconds"),
-            "parts": list(snapshot["expected_parts"]),
-            "status": "loaded" if mark_loaded else "queued",
-        }
-        queue_index = next(
-            (index for index, item in enumerate(state.get("formed_queue", [])) if str(item.get("dat_name") or "") == dat_name),
+        existing_entry = next(
+            (item for item in state.get("formed_active_lists", []) if str(item.get("dat_name") or "") == dat_name),
             None,
         )
-        if queue_index is None:
-            if snapshot["expected_parts"]:
-                state.setdefault("formed_queue", []).append(queue_entry)
-        else:
-            if snapshot["expected_parts"]:
-                state["formed_queue"][queue_index] = queue_entry
-            else:
-                state["formed_queue"].pop(queue_index)
-
         active_entry = {
             "dat_name": dat_name,
+            "run_number": int(snapshot.get("run_number") or 1),
             "loaded_at": snapshot.get("loaded_at") or datetime.now().isoformat(timespec="seconds"),
             "forming_batch_id": snapshot["batch_id"],
             "com_numbers": list(snapshot["com_numbers"]),
             "expected_parts": list(snapshot["expected_parts"]),
             "scanned_parts": list(snapshot["scanned_parts"]),
+            "scan_edit_mode": bool(existing_entry.get("scan_edit_mode")) if existing_entry is not None else False,
         }
         active_index = next(
             (index for index, item in enumerate(state.get("formed_active_lists", [])) if str(item.get("dat_name") or "") == dat_name),
@@ -707,22 +1466,31 @@ class UiStateStore:
                 state["message"] = "Scan NEST DATA"
             state["message_level"] = "info"
         elif field_name == "nest_data":
-            state["nest_data"] = cleaned
-            state["update_target"] = ""
-            snapshot = self._load_flat_scan_snapshot(cleaned)
-            state["flat_scan_session_id"] = snapshot["session_id"]
-            state["flat_scan_status"] = snapshot["status"]
-            state["expected_parts"] = list(snapshot["expected_parts"])
-            state["scanned_parts"] = list(snapshot["scanned_parts"])
-            self._queue_formed_from_nest(state, cleaned)
-            if state["expected_parts"]:
-                state["active_field"] = "part_scan"
-                state["message"] = "Continue scanning parts" if state["scanned_parts"] else "Start scanning parts"
-                state["message_level"] = "info"
-            else:
+            with get_connection() as connection:
+                create_schema(connection)
+                rows = self._load_resolved_rows_for_dat(connection, cleaned)
+                if not rows:
+                    raise UiStateError(f"No resolved parts found for {cleaned}")
+                repeat_info = self._load_repeat_scan_info(connection, cleaned, rows)
+
+            if repeat_info["has_completed_run"]:
+                state["nest_data"] = ""
+                state["update_target"] = ""
+                state["flat_scan_session_id"] = None
+                state["flat_scan_status"] = ""
+                state["current_run_number"] = 0
+                state["expected_parts"] = []
+                state["scanned_parts"] = []
+                state["scan_edit_mode"] = False
                 state["active_field"] = "nest_data"
-                state["message"] = f"All parts already scanned for {cleaned}. Scan the next DAT."
-                state["message_level"] = "success"
+                state["message"] = "Program is Already in System. Are you sure you want continue?"
+                state["message_level"] = "warning"
+                state["repeat_scan_pending"] = True
+                state["pending_repeat_dat"] = cleaned
+                state["pending_repeat_run_number"] = int(repeat_info["next_run_number"])
+            else:
+                snapshot = self._load_flat_scan_snapshot(cleaned)
+                self._apply_flat_scan_snapshot(state, cleaned, snapshot)
         elif field_name == "part_scan":
             if not state.get("nest_data"):
                 raise UiStateError("Scan nest data before scanning parts.")
@@ -733,11 +1501,136 @@ class UiStateStore:
         self.write(state)
         return state
 
+    def confirm_repeat_scan(self) -> dict[str, Any]:
+        state = self.read()
+        if not state.get("repeat_scan_pending"):
+            raise UiStateError("No repeat scan is waiting for confirmation.")
+
+        dat_name = str(state.get("pending_repeat_dat") or "").strip()
+        run_number = int(state.get("pending_repeat_run_number") or 0)
+        if not dat_name or run_number <= 1:
+            raise UiStateError("Repeat scan details were missing. Scan the DAT again.")
+
+        snapshot = self._load_flat_scan_snapshot(
+            dat_name,
+            start_new_session=True,
+            forced_run_number=run_number,
+        )
+        self._apply_flat_scan_snapshot(state, dat_name, snapshot)
+        state["message"] = f"Run {run_number} started for {dat_name}. Start scanning parts."
+        state["message_level"] = "warning"
+        self.write(state)
+        return state
+
+    def cancel_repeat_scan(self) -> dict[str, Any]:
+        state = self.read()
+        self._clear_repeat_scan_prompt(state)
+        state["active_field"] = "nest_data"
+        state["message"] = "Repeat scan canceled. Scan NEST DATA."
+        state["message_level"] = "info"
+        self.write(state)
+        return state
+
+    def _load_latest_tracker_rows_for_dat(self, connection, dat_name: str, *, requires_forming_only: bool = False):
+        latest_run_row = connection.execute(
+            """
+            SELECT COALESCE(MAX(run_number), 0) AS latest_run
+            FROM part_tracker_items
+            WHERE UPPER(TRIM(dat_name)) = UPPER(TRIM(?))
+            """,
+            (dat_name,),
+        ).fetchone()
+        latest_run = int(latest_run_row["latest_run"] or 0) if latest_run_row is not None else 0
+        if latest_run <= 0:
+            return []
+
+        sql = """
+            SELECT
+                tracker_key,
+                flat_scan_session_id,
+                run_number,
+                dat_name,
+                nest_part_id,
+                scan_sequence,
+                part_number,
+                part_revision,
+                com_number,
+                machine,
+                user_code,
+                location,
+                requires_forming,
+                stage
+            FROM part_tracker_items
+            WHERE UPPER(TRIM(dat_name)) = UPPER(TRIM(?))
+              AND run_number = ?
+        """
+        params: list[Any] = [dat_name, latest_run]
+        if requires_forming_only:
+            sql += " AND requires_forming = 1"
+        sql += " ORDER BY part_number, scan_sequence"
+        return connection.execute(sql, tuple(params)).fetchall()
+
+    def _load_formed_queue_preview(self, dat_name: str) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            create_schema(connection)
+            rows = self._load_latest_tracker_rows_for_dat(connection, dat_name, requires_forming_only=True)
+
+        if not rows:
+            return None
+
+        queued_rows = [
+            row
+            for row in rows
+            if self._normalize_tracker_stage(str(row["stage"] or ""), requires_forming=True)
+            in {TRACKER_STAGE_PROG, TRACKER_STAGE_CUT}
+        ]
+        if not queued_rows:
+            return None
+
+        ready_count = sum(
+            1
+            for row in queued_rows
+            if self._normalize_tracker_stage(str(row["stage"] or ""), requires_forming=True) == TRACKER_STAGE_CUT
+        )
+        return {
+            "dat_name": str(queued_rows[0]["dat_name"] or dat_name),
+            "run_number": int(queued_rows[0]["run_number"] or 1),
+            "part_count": len(queued_rows),
+            "ready_count": ready_count,
+        }
+
+    @staticmethod
+    def _remove_formed_queue_entry(state: dict[str, Any], dat_name: str) -> None:
+        state["formed_queue"] = [
+            item for item in state.get("formed_queue", []) if str(item.get("dat_name") or "") != dat_name
+        ]
+
+    @staticmethod
+    def _upsert_formed_queue_entry(state: dict[str, Any], preview: dict[str, Any]) -> None:
+        dat_name = str(preview.get("dat_name") or "")
+        entry = {
+            "dat_name": dat_name,
+            "run_number": int(preview.get("run_number") or 1),
+            "part_count": int(preview.get("part_count") or 0),
+            "ready_count": int(preview.get("ready_count") or 0),
+        }
+        queue_index = next(
+            (index for index, item in enumerate(state.get("formed_queue", [])) if str(item.get("dat_name") or "") == dat_name),
+            None,
+        )
+        if queue_index is None:
+            state.setdefault("formed_queue", []).append(entry)
+        else:
+            state["formed_queue"][queue_index] = entry
+
     def _queue_formed_from_nest(self, state: dict[str, Any], dat_name: str) -> None:
-        snapshot = self._load_forming_batch_snapshot(dat_name, mark_started=False)
-        if snapshot is None:
+        preview = self._load_formed_queue_preview(dat_name)
+        if preview is None:
+            self._remove_formed_queue_entry(state, dat_name)
             return
-        self._apply_forming_snapshot_to_state(state, snapshot, mark_loaded=False)
+        if any(str(item.get("dat_name") or "") == dat_name for item in state.get("formed_active_lists", [])):
+            return
+        self._upsert_formed_queue_entry(state, preview)
 
     @staticmethod
     def _normalize_dat_token(raw: str) -> str:
@@ -772,6 +1665,9 @@ class UiStateStore:
             raise UiStateError(f"Part {part_number} is not expected or is already complete.")
 
         state["expected_parts"].pop(target_index)
+        target["machine"] = str(state.get("machine_code") or "")
+        target["user_code"] = str(state.get("user_code") or "")
+        target["location"] = str(target.get("location") or state.get("location_code") or "")
         state["scanned_parts"].append(target)
         self._increment_flat_scan_item(state.get("flat_scan_session_id"), target)
 
@@ -801,20 +1697,44 @@ class UiStateStore:
         }
         changed = False
         for dat_name in sorted(known_dats):
-            snapshot = self._load_forming_batch_snapshot(dat_name, mark_started=False)
-            if snapshot is None:
-                continue
-            is_loaded = any(
-                str(item.get("dat_name") or "").strip() == dat_name
-                for item in state.get("formed_active_lists", [])
+            active_dat = next(
+                (item for item in state.get("formed_active_lists", []) if str(item.get("dat_name") or "").strip() == dat_name),
+                None,
             )
-            self._apply_forming_snapshot_to_state(state, snapshot, mark_loaded=is_loaded)
+            if active_dat is not None:
+                snapshot = self._load_forming_batch_snapshot(dat_name, mark_started=False)
+                if snapshot is None:
+                    state["formed_active_lists"] = [
+                        item for item in state.get("formed_active_lists", []) if str(item.get("dat_name") or "") != dat_name
+                    ]
+                else:
+                    self._apply_forming_snapshot_to_state(state, snapshot, mark_loaded=True)
+                self._remove_formed_queue_entry(state, dat_name)
+                changed = True
+                continue
+
+            preview = self._load_formed_queue_preview(dat_name)
+            if preview is None:
+                before_count = len(state.get("formed_queue", []))
+                self._remove_formed_queue_entry(state, dat_name)
+                changed = changed or len(state.get("formed_queue", [])) != before_count
+                continue
+
+            self._upsert_formed_queue_entry(state, preview)
             changed = True
         if changed:
             self.write(state)
+
+        lists: list[dict[str, Any]] = []
+        for dat_list in state["formed_active_lists"]:
+            payload = dict(dat_list)
+            payload["can_complete"] = not payload.get("expected_parts") and bool(payload.get("scanned_parts"))
+            payload["can_force_complete"] = bool(payload.get("expected_parts") or payload.get("scanned_parts"))
+            payload["can_edit_scanned"] = bool(payload.get("scanned_parts"))
+            lists.append(payload)
         return {
-            "queue": [item for item in state["formed_queue"] if item.get("status") == "queued"],
-            "lists": state["formed_active_lists"],
+            "queue": list(state["formed_queue"]),
+            "lists": lists,
             "active_field": state["formed_active_field"],
             "message": state["formed_message"],
             "message_level": state["formed_message_level"],
@@ -826,13 +1746,20 @@ class UiStateStore:
         if not token:
             raise UiStateError("DAT token was blank.")
 
+        preview = self._load_formed_queue_preview(token)
+        if preview is None:
+            raise UiStateError(f"No formed parts are waiting for {token} in the latest run.")
+        if int(preview.get("ready_count") or 0) <= 0:
+            raise UiStateError(f"{token} is queued for forming, but cut stage is not complete yet.")
+
         snapshot = self._load_forming_batch_snapshot(token, mark_started=True)
         if snapshot is None:
-            raise UiStateError(f"No forming parts found for {token}")
+            raise UiStateError(f"No formed parts are ready for {token}.")
 
         self._apply_forming_snapshot_to_state(state, snapshot, mark_loaded=True)
+        self._remove_formed_queue_entry(state, token)
         state["formed_active_field"] = "part_scan"
-        state["formed_message"] = f"Loaded formed list for {snapshot['dat_name']}. Scan formed parts."
+        state["formed_message"] = f"Loaded formed run {snapshot['run_number']} for {snapshot['dat_name']}. Scan formed parts."
         state["formed_message_level"] = "info"
         self.write(state)
         return state
@@ -842,13 +1769,18 @@ class UiStateStore:
         if not token:
             return False, None
 
+        preview = self._load_formed_queue_preview(token)
+        if preview is None or int(preview.get("ready_count") or 0) <= 0:
+            return False, token
+
         snapshot = self._load_forming_batch_snapshot(token, mark_started=True)
         if snapshot is None:
             return False, token
 
         self._apply_forming_snapshot_to_state(state, snapshot, mark_loaded=True)
+        self._remove_formed_queue_entry(state, token)
         state["formed_active_field"] = "part_scan"
-        state["formed_message"] = f"Loaded formed list for {snapshot['dat_name']}. Scan formed parts."
+        state["formed_message"] = f"Loaded formed run {snapshot['run_number']} for {snapshot['dat_name']}. Scan formed parts."
         state["formed_message_level"] = "info"
         return True, token
 
@@ -1044,6 +1976,141 @@ class UiStateStore:
         self.write(state)
         return state
 
+    @staticmethod
+    def _find_formed_list(state: dict[str, Any], batch_id: int) -> tuple[int, dict[str, Any]]:
+        for index, dat_list in enumerate(state.get("formed_active_lists", [])):
+            if int(dat_list.get("forming_batch_id") or 0) == int(batch_id):
+                return index, dat_list
+        raise UiStateError("Formed batch was not found in this session.")
+
+    def start_formed_scan_edit(self, batch_id: int | str) -> dict[str, Any]:
+        state = self.read()
+        index, dat_list = self._find_formed_list(state, int(batch_id))
+        if not dat_list.get("scanned_parts"):
+            raise UiStateError("Scan at least one formed part before editing the scanned list.")
+        state["formed_active_lists"][index]["scan_edit_mode"] = True
+        state["formed_message"] = f"Edit formed scanned parts for {dat_list['dat_name']}, then click Done."
+        state["formed_message_level"] = "info"
+        self.write(state)
+        return state
+
+    def save_formed_scan_edits(self, form) -> dict[str, Any]:
+        state = self.read()
+        batch_id = int(str(form.get("batch_id", "0") or "0"))
+        index, dat_list = self._find_formed_list(state, batch_id)
+        if not dat_list.get("scan_edit_mode"):
+            return state
+
+        updated_parts: list[dict[str, Any]] = []
+        for part_index, raw_part in enumerate(dat_list.get("scanned_parts", [])):
+            part = dict(raw_part)
+            part_number = str(form.get(f"formed_scanned_{part_index}_part_number", part.get("part_number", "")) or "").strip()
+            com_number = str(form.get(f"formed_scanned_{part_index}_com_number", part.get("com_number", "")) or "").strip()
+            location = str(form.get(f"formed_scanned_{part_index}_location", part.get("location", "")) or "").strip()
+            if not part_number:
+                raise UiStateError("Part number cannot be blank in formed edit mode.")
+            part["part_number"] = part_number
+            part["com_number"] = com_number
+            part["location"] = location
+            updated_parts.append(part)
+
+        state["formed_active_lists"][index]["scanned_parts"] = updated_parts
+        state["formed_active_lists"][index]["scan_edit_mode"] = False
+        state["formed_message"] = f"Formed edits saved for {dat_list['dat_name']}. Click Complete or Force Complete to submit them."
+        state["formed_message_level"] = "success"
+        self.write(state)
+        return state
+
+    def formed_complete_current_batch(self, batch_id: int | str) -> int:
+        state = self.read()
+        index, dat_list = self._find_formed_list(state, int(batch_id))
+        if dat_list["expected_parts"]:
+            raise UiStateError("Cannot complete formed batch yet. There are still expected parts remaining.")
+        if not dat_list["scanned_parts"]:
+            raise UiStateError("No formed scanned parts to complete.")
+
+        count = self._apply_tracker_stage(
+            state,
+            list(dat_list["scanned_parts"]),
+            TRACKER_STAGE_FORMED,
+            event_type="formed_complete",
+            scanner_name="formed",
+            notes="Formed scanner complete submitted Formed stage.",
+        )
+
+        now = datetime.now().isoformat(timespec="seconds")
+        with get_connection() as connection:
+            create_schema(connection)
+            connection.execute(
+                """
+                UPDATE forming_batch_items
+                SET is_complete = CASE
+                        WHEN scanned_quantity >= expected_quantity THEN 1
+                        ELSE 0
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE forming_batch_id = ?
+                """,
+                (int(dat_list["forming_batch_id"]),),
+            )
+            connection.execute(
+                "UPDATE forming_batches SET status = 'completed', completed_at = COALESCE(completed_at, ?) WHERE id = ?",
+                (now, int(dat_list["forming_batch_id"])),
+            )
+            self._touch_monitor_units(connection, self._extract_com_numbers(dat_list["scanned_parts"]))
+            connection.commit()
+
+        state["formed_active_lists"].pop(index)
+        self._remove_formed_queue_entry(state, str(dat_list.get("dat_name") or ""))
+        state["formed_active_field"] = "part_scan" if state.get("formed_active_lists") else "dat_token"
+        state["formed_message"] = f"Formed batch completed. Updated {count} parts to Formed."
+        state["formed_message_level"] = "success"
+        self.write(state)
+        return count
+
+    def formed_force_complete_current_batch(self, batch_id: int | str) -> tuple[int, int]:
+        state = self.read()
+        index, dat_list = self._find_formed_list(state, int(batch_id))
+        scanned_parts = list(dat_list.get("scanned_parts", []))
+        missing_parts = [dict(part) for part in dat_list.get("expected_parts", [])]
+        if not scanned_parts and not missing_parts:
+            raise UiStateError("No formed batch loaded to force complete.")
+
+        scanned_count = self._apply_tracker_stage(
+            state,
+            scanned_parts,
+            TRACKER_STAGE_FORMED,
+            event_type="formed_force_complete",
+            scanner_name="formed",
+            notes="Formed scanner force complete submitted Formed stage.",
+        )
+        missing_count = self._apply_tracker_stage(
+            state,
+            missing_parts,
+            TRACKER_STAGE_MISSING,
+            event_type="formed_force_missing",
+            scanner_name="formed",
+            notes="Formed scanner force complete marked part Missing.",
+        )
+
+        now = datetime.now().isoformat(timespec="seconds")
+        with get_connection() as connection:
+            create_schema(connection)
+            connection.execute(
+                "UPDATE forming_batches SET status = 'completed', completed_at = COALESCE(completed_at, ?) WHERE id = ?",
+                (now, int(dat_list["forming_batch_id"])),
+            )
+            self._touch_monitor_units(connection, self._extract_com_numbers(scanned_parts + missing_parts))
+            connection.commit()
+
+        state["formed_active_lists"].pop(index)
+        self._remove_formed_queue_entry(state, str(dat_list.get("dat_name") or ""))
+        state["formed_active_field"] = "part_scan" if state.get("formed_active_lists") else "dat_token"
+        state["formed_message"] = f"Formed force complete updated {scanned_count} parts to Formed and {missing_count} to Missing."
+        state["formed_message_level"] = "success"
+        self.write(state)
+        return scanned_count, missing_count
+
     def complete_current_batch(self) -> int:
         state = self.read()
         if state["expected_parts"]:
@@ -1052,24 +2119,14 @@ class UiStateStore:
             raise UiStateError("No scanned parts to complete.")
 
         now = datetime.now().isoformat(timespec="seconds")
-        archive_rows = self._read_completed()
-        for part in state["scanned_parts"]:
-            archive_rows.append(
-                {
-                    "completed_at": now,
-                    "machine": state.get("machine_code") or "",
-                    "user": state.get("user_code") or "",
-                    "location": state.get("location_code") or "",
-                    "nest_data": state.get("nest_data") or "",
-                    "part_number": part.get("part_number"),
-                    "part_revision": part.get("part_revision"),
-                    "com_number": part.get("com_number"),
-                    "f_flag": bool(part.get("requires_forming")),
-                }
-            )
-
-        count = len(state["scanned_parts"])
-        self._write_completed(archive_rows)
+        count = self._apply_tracker_stage(
+            state,
+            list(state["scanned_parts"]),
+            TRACKER_STAGE_CUT,
+            event_type="main_complete",
+            scanner_name="main",
+            notes="Main scanner complete submitted Cut stage.",
+        )
 
         flat_scan_session_id = state.get("flat_scan_session_id")
         if flat_scan_session_id is not None:
@@ -1094,24 +2151,53 @@ class UiStateStore:
                 self._touch_monitor_units(connection, self._extract_com_numbers(state["scanned_parts"]))
                 connection.commit()
 
-        reset_state = self._default_state()
-        reset_state["machine_code"] = state.get("machine_code", "")
-        reset_state["user_code"] = state.get("user_code", "")
-        reset_state["location_code"] = state.get("location_code", "")
-        reset_state["formed_queue"] = state.get("formed_queue", [])
-        reset_state["formed_active_lists"] = state.get("formed_active_lists", [])
-        reset_state["formed_active_field"] = state.get("formed_active_field", "dat_token")
-        reset_state["formed_message"] = state.get("formed_message", "Scan DAT token to load formed list")
-        reset_state["formed_message_level"] = state.get("formed_message_level", "info")
-        if reset_state["machine_code"] and reset_state["user_code"] and reset_state["location_code"]:
-            reset_state["active_field"] = "nest_data"
-            reset_state["message"] = f"Batch completed. Archived {count} parts. Scan NEST DATA."
-        else:
-            reset_state["active_field"] = "machine_code"
-            reset_state["message"] = f"Batch completed. Archived {count} parts. Scan MACHINE."
-        reset_state["message_level"] = "success"
-        self.write(reset_state)
+        self._reset_after_batch_submission(state, f"Batch completed. Updated {count} parts to Cut. Scan NEST DATA.")
         return count
+
+    def force_complete_current_batch(self) -> tuple[int, int]:
+        state = self.read()
+        if not state.get("nest_data"):
+            raise UiStateError("Scan NEST DATA before forcing completion.")
+
+        scanned_parts = list(state.get("scanned_parts", []))
+        missing_parts = [dict(part) for part in state.get("expected_parts", [])]
+        if not scanned_parts and not missing_parts:
+            raise UiStateError("No active batch loaded to force complete.")
+
+        scanned_count = self._apply_tracker_stage(
+            state,
+            scanned_parts,
+            TRACKER_STAGE_CUT,
+            event_type="main_force_complete",
+            scanner_name="main",
+            notes="Main scanner force complete submitted Cut stage.",
+        )
+        missing_count = self._apply_tracker_stage(
+            state,
+            missing_parts,
+            TRACKER_STAGE_MISSING,
+            event_type="main_force_missing",
+            scanner_name="main",
+            notes="Main scanner force complete marked part Missing.",
+        )
+
+        flat_scan_session_id = state.get("flat_scan_session_id")
+        if flat_scan_session_id is not None:
+            now = datetime.now().isoformat(timespec="seconds")
+            with get_connection() as connection:
+                create_schema(connection)
+                connection.execute(
+                    "UPDATE flat_scan_sessions SET status = 'completed', completed_at = COALESCE(completed_at, ?) WHERE id = ?",
+                    (now, int(flat_scan_session_id)),
+                )
+                self._touch_monitor_units(connection, self._extract_com_numbers(scanned_parts + missing_parts))
+                connection.commit()
+
+        self._reset_after_batch_submission(
+            state,
+            f"Force complete sent {scanned_count} parts to Cut and {missing_count} parts to Missing. Scan NEST DATA.",
+        )
+        return scanned_count, missing_count
 
     def clear_session_data(self) -> dict[str, Any]:
         state = self._default_state()
@@ -1123,6 +2209,8 @@ class UiStateStore:
             create_schema(connection)
             connection.executescript(
                 """
+                DELETE FROM part_tracker_items;
+                DELETE FROM part_tracker_history;
                 DELETE FROM scan_events;
                 DELETE FROM flat_scan_items;
                 DELETE FROM flat_scan_sessions;
@@ -1132,6 +2220,8 @@ class UiStateStore:
                 DELETE FROM monitor_units;
                 DELETE FROM sqlite_sequence WHERE name IN (
                     'scan_events',
+                    'part_tracker_items',
+                    'part_tracker_history',
                     'flat_scan_items',
                     'flat_scan_sessions',
                     'forming_batch_items',
@@ -1148,19 +2238,161 @@ class UiStateStore:
     def clear_runtime_data(self) -> dict[str, Any]:
         state = self._default_state()
         self.write(state)
+        with get_connection() as connection:
+            create_schema(connection)
+            connection.execute("DELETE FROM part_tracker_items")
+            connection.execute("DELETE FROM part_tracker_history")
+            connection.commit()
         self._write_completed([])
         self._write_missed([])
         return state
 
-    def get_completed_list(self) -> list[dict[str, Any]]:
-        return self._read_completed()
+    def get_completed_list(self, search_query: str = "") -> list[dict[str, Any]]:
+        query = str(search_query or "").strip()
+        sql = """
+            SELECT
+                tracker_key,
+                run_number,
+                (
+                    SELECT COALESCE(MAX(latest.run_number), 1)
+                    FROM part_tracker_items latest
+                    WHERE UPPER(TRIM(latest.dat_name)) = UPPER(TRIM(part_tracker_items.dat_name))
+                ) AS latest_run_number,
+                dat_name,
+                part_number,
+                part_revision,
+                com_number,
+                machine,
+                user_code,
+                location,
+                requires_forming,
+                stage,
+                stage_updated_at,
+                created_at,
+                updated_at
+            FROM part_tracker_items
+        """
+        params: tuple[Any, ...] = ()
+        if query:
+            pattern = f"%{query.replace('%', r'\%').replace('_', r'\_')}%"
+            sql += """
+                WHERE part_number LIKE ? ESCAPE '\\' COLLATE NOCASE
+                   OR COALESCE(com_number, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+                   OR COALESCE(dat_name, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+                   OR COALESCE(location, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+            """
+            params = (pattern, pattern, pattern, pattern)
+        sql += " ORDER BY stage_updated_at DESC, updated_at DESC, dat_name DESC, part_number, scan_sequence"
+
+        with get_connection() as connection:
+            create_schema(connection)
+            rows = connection.execute(sql, params).fetchall()
+
+        return [self._tracker_row_payload(row) for row in rows]
+
+    def get_part_history(self, tracker_key: str) -> dict[str, Any]:
+        cleaned = str(tracker_key or "").strip()
+        if not cleaned:
+            raise UiStateError("Part history requires a tracker row.")
+
+        with get_connection() as connection:
+            create_schema(connection)
+            current_row = connection.execute(
+                """
+                SELECT
+                    tracker_key,
+                    run_number,
+                    run_number AS latest_run_number,
+                    dat_name,
+                    nest_part_id,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    stage_updated_at,
+                    created_at,
+                    updated_at
+                FROM part_tracker_items
+                WHERE tracker_key = ?
+                """,
+                (cleaned,),
+            ).fetchone()
+
+            if current_row is None:
+                history_seed = connection.execute(
+                    """
+                    SELECT dat_name, nest_part_id, scan_sequence
+                    FROM part_tracker_history
+                    WHERE tracker_key = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (cleaned,),
+                ).fetchone()
+                if history_seed is None:
+                    raise UiStateError("Part history was not found.")
+                dat_name = str(history_seed["dat_name"] or "")
+                nest_part_id = int(history_seed["nest_part_id"]) if history_seed["nest_part_id"] is not None else None
+                sequence = int(history_seed["scan_sequence"] or 1)
+            else:
+                dat_name = str(current_row["dat_name"] or "")
+                nest_part_id = int(current_row["nest_part_id"]) if current_row["nest_part_id"] is not None else None
+                sequence = int(current_row["scan_sequence"] or 1)
+
+            history_rows = connection.execute(
+                """
+                SELECT
+                    tracker_key,
+                    event_type,
+                    scanner_name,
+                    dat_name,
+                    run_number,
+                    nest_part_id,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    recorded_at,
+                    notes
+                FROM part_tracker_history
+                WHERE UPPER(TRIM(dat_name)) = UPPER(TRIM(?))
+                  AND COALESCE(nest_part_id, -1) = COALESCE(?, -1)
+                  AND COALESCE(scan_sequence, 1) = ?
+                ORDER BY recorded_at DESC, id DESC
+                """,
+                (dat_name, nest_part_id, sequence),
+            ).fetchall()
+
+        current_payload = self._tracker_row_payload(current_row) if current_row is not None else None
+        history_payload = [self._history_row_payload(row) for row in history_rows]
+        return {
+            "current_row": current_payload,
+            "history_rows": history_payload,
+            "dat_name": dat_name,
+            "scan_sequence": sequence,
+        }
 
     def get_missed_list(self) -> list[dict[str, Any]]:
         return self._read_missed()
 
     def clear_completed_list(self) -> int:
-        existing = self._read_completed()
-        removed = len(existing)
+        with get_connection() as connection:
+            create_schema(connection)
+            row = connection.execute("SELECT COUNT(*) AS count FROM part_tracker_items").fetchone()
+            removed = int(row["count"] or 0) if row is not None else 0
+            connection.execute("DELETE FROM part_tracker_items")
+            connection.execute("DELETE FROM part_tracker_history")
+            connection.commit()
         self._write_completed([])
         return removed
 

@@ -131,11 +131,17 @@ def create_ui_app() -> Flask:
     def build_context() -> dict:
         state = store.read()
         summary = store.summary(state)
+        has_active_batch = bool(state.get("nest_data")) and summary["expected_total"] > 0
         return {
             "state": state,
             "summary": summary,
             "expected_parts": store.expected_remaining_list(state),
             "scanned_parts": store.scanned_counts(state),
+            "has_active_batch": has_active_batch,
+            "current_run_number": int(state.get("current_run_number") or 0),
+            "repeat_scan_pending": bool(state.get("repeat_scan_pending")),
+            "pending_repeat_dat": str(state.get("pending_repeat_dat") or ""),
+            "pending_repeat_run_number": int(state.get("pending_repeat_run_number") or 0),
             "can_complete": (
                 (not state.get("review_mode"))
                 and state.get("flat_scan_status") != "completed"
@@ -143,6 +149,8 @@ def create_ui_app() -> Flask:
                 and summary["scanned_total"] > 0
             ),
             "can_force_complete": (not state.get("review_mode")) and bool(state.get("nest_data")) and summary["expected_total"] > 0,
+            "can_edit_scanned": bool(state.get("nest_data")) and bool(state.get("scanned_parts")),
+            "scan_edit_mode": bool(state.get("scan_edit_mode")),
             "review_mode": bool(state.get("review_mode")),
             "review_edit_mode": bool(state.get("review_edit_mode")),
             "review_rows": list(state.get("review_rows", [])),
@@ -191,12 +199,38 @@ def create_ui_app() -> Flask:
     @app.post("/scan/<field_name>")
     def scan_field(field_name: str):
         try:
-            store.scan_field(field_name, request.form.get("value", ""))
+            state = store.scan_field(field_name, request.form.get("value", ""))
         except UiStateError as exc:
             store.invalidate_scan(str(exc))
             flash(str(exc), "error")
         else:
-            flash("Scan accepted.", "success")
+            if not (field_name == "nest_data" and state.get("repeat_scan_pending")):
+                flash("Scan accepted.", "success")
+        return redirect(url_for("home"))
+
+    @app.post("/repeat-scan/confirm")
+    def confirm_repeat_scan():
+        try:
+            state = store.confirm_repeat_scan()
+        except UiStateError as exc:
+            store.invalidate_scan(str(exc))
+            flash(str(exc), "error")
+        else:
+            flash(
+                f"Started repeat run {int(state.get('current_run_number') or 0)} for {state.get('nest_data') or ''}.",
+                "success",
+            )
+        return redirect(url_for("home"))
+
+    @app.post("/repeat-scan/cancel")
+    def cancel_repeat_scan():
+        try:
+            store.cancel_repeat_scan()
+        except UiStateError as exc:
+            store.invalidate_scan(str(exc))
+            flash(str(exc), "error")
+        else:
+            flash("Repeat scan canceled.", "success")
         return redirect(url_for("home"))
 
     @app.get("/formed")
@@ -232,59 +266,53 @@ def create_ui_app() -> Flask:
     @app.post("/formed/complete")
     def formed_complete_batch():
         try:
-            store.formed_complete_current_batch()
+            updated_count = store.formed_complete_current_batch(request.form.get("batch_id", ""))
         except UiStateError as exc:
             store.invalidate_formed_scan(str(exc))
             flash(str(exc), "error")
         else:
-            flash("Formed batch ready for review. Edit if needed, then save and send.", "success")
+            flash(f"Updated {updated_count} tracker rows to Formed.", "success")
         return redirect(url_for("formed_home"))
 
     @app.post("/formed/force-complete")
     def formed_force_complete_batch():
         try:
-            store.formed_force_complete_current_batch()
-        except UiStateError as exc:
-            store.invalidate_formed_scan(str(exc))
-            flash(str(exc), "error")
-        else:
-            flash("Formed force complete opened review with missed scans included.", "success")
-        return redirect(url_for("formed_home"))
-
-    @app.post("/formed/review/edit")
-    def formed_edit_review():
-        try:
-            store.enable_formed_review_edit(request.form)
-        except UiStateError as exc:
-            store.invalidate_formed_scan(str(exc))
-            flash(str(exc), "error")
-        else:
-            flash("Formed review editing enabled.", "success")
-        return redirect(url_for("formed_home"))
-
-    @app.post("/formed/review/add-manual")
-    def formed_add_manual_review_row():
-        try:
-            store.add_manual_formed_review_row(request.form)
-        except UiStateError as exc:
-            store.invalidate_formed_scan(str(exc))
-            flash(str(exc), "error")
-        else:
-            flash("Manual formed row added.", "success")
-        return redirect(url_for("formed_home"))
-
-    @app.post("/formed/review/save")
-    def formed_save_review():
-        try:
-            completed_count, missed_count = store.save_formed_review(request.form)
+            scanned_count, missing_count = store.formed_force_complete_current_batch(request.form.get("batch_id", ""))
         except UiStateError as exc:
             store.invalidate_formed_scan(str(exc))
             flash(str(exc), "error")
         else:
             flash(
-                f"Sent {completed_count} formed rows to part tracker and {missed_count} to missed scans.",
+                f"Formed force complete updated {scanned_count} tracker rows to Formed and {missing_count} to Missing.",
                 "success",
             )
+        return redirect(url_for("formed_home"))
+
+    @app.post("/formed/review/edit")
+    def formed_edit_review():
+        try:
+            store.start_formed_scan_edit(request.form.get("batch_id", ""))
+        except UiStateError as exc:
+            store.invalidate_formed_scan(str(exc))
+            flash(str(exc), "error")
+        else:
+            flash("Formed scanned-part editing enabled for this browser session.", "success")
+        return redirect(url_for("formed_home"))
+
+    @app.post("/formed/review/add-manual")
+    def formed_add_manual_review_row():
+        flash("Manual formed rows are not supported in this flow.", "error")
+        return redirect(url_for("formed_home"))
+
+    @app.post("/formed/review/save")
+    def formed_save_review():
+        try:
+            store.save_formed_scan_edits(request.form)
+        except UiStateError as exc:
+            store.invalidate_formed_scan(str(exc))
+            flash(str(exc), "error")
+        else:
+            flash("Formed scanned-part edits saved to this browser session.", "success")
         return redirect(url_for("formed_home"))
 
     @app.post("/reset")
@@ -296,34 +324,37 @@ def create_ui_app() -> Flask:
     @app.post("/complete")
     def complete_batch():
         try:
-            store.complete_current_batch()
+            updated_count = store.complete_current_batch()
         except UiStateError as exc:
             store.invalidate_scan(str(exc))
             flash(str(exc), "error")
         else:
-            flash("Batch ready for review. Edit if needed, then save and send.", "success")
+            flash(f"Updated {updated_count} tracker rows to Cut.", "success")
         return redirect(url_for("home"))
 
     @app.post("/force-complete")
     def force_complete_batch():
         try:
-            store.force_complete_current_batch()
+            scanned_count, missing_count = store.force_complete_current_batch()
         except UiStateError as exc:
             store.invalidate_scan(str(exc))
             flash(str(exc), "error")
         else:
-            flash("Force complete opened review with missed scans included.", "success")
+            flash(
+                f"Force complete updated {scanned_count} tracker rows to Cut and {missing_count} to Missing.",
+                "success",
+            )
         return redirect(url_for("home"))
 
     @app.post("/review/edit")
     def edit_review():
         try:
-            store.enable_review_edit(request.form)
+            store.start_scan_edit()
         except UiStateError as exc:
             store.invalidate_scan(str(exc))
             flash(str(exc), "error")
         else:
-            flash("Review editing enabled.", "success")
+            flash("Scanned part editing enabled for this browser session.", "success")
         return redirect(url_for("home"))
 
     @app.post("/review/add-manual")
@@ -340,21 +371,18 @@ def create_ui_app() -> Flask:
     @app.post("/review/save")
     def save_review():
         try:
-            completed_count, missed_count = store.save_review(request.form)
+            store.save_scan_edits(request.form)
         except UiStateError as exc:
             store.invalidate_scan(str(exc))
             flash(str(exc), "error")
         else:
-            flash(
-                f"Sent {completed_count} rows to part tracker and {missed_count} rows to missed scans.",
-                "success",
-            )
+            flash("Scanned part edits saved to this browser session.", "success")
         return redirect(url_for("home"))
 
     @app.post("/clear-completed")
     def clear_completed():
         removed = store.clear_completed_list()
-        flash(f"Cleared archived list ({removed} rows).", "success")
+        flash(f"Cleared part tracker ({removed} rows).", "success")
         return redirect(request.referrer or url_for("home"))
 
     @app.post("/clear-missed")
@@ -377,9 +405,31 @@ def create_ui_app() -> Flask:
 
     @app.get("/completed-list")
     def completed_list():
-        rows = store.get_completed_list()
-        missed_rows = store.get_missed_list()
-        return render_template("completed_list.html", rows=rows, missed_rows=missed_rows)
+        search_query = str(request.args.get("q", "") or "").strip()
+        rows = store.get_completed_list(search_query)
+        summary = {
+            "total": len(rows),
+            "prog": sum(1 for row in rows if row.get("stage") == "Prog"),
+            "cut": sum(1 for row in rows if row.get("stage") == "Cut"),
+            "formed": sum(1 for row in rows if row.get("stage") == "Formed"),
+            "missing": sum(1 for row in rows if row.get("stage") == "Missing"),
+        }
+        return render_template(
+            "completed_list.html",
+            rows=rows,
+            search_query=search_query,
+            summary=summary,
+        )
+
+    @app.get("/completed-list/history")
+    def completed_part_history():
+        tracker_key = str(request.args.get("tracker_key", "") or "").strip()
+        try:
+            history = store.get_part_history(tracker_key)
+        except UiStateError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("completed_list"))
+        return render_template("completed_history.html", **history)
 
     @app.get("/api/state")
     def api_state():

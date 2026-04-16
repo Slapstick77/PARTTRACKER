@@ -2,6 +2,34 @@
 
 This file tracks notable changes made to the NEWTRACKER application during active development.
 
+## 2026-04-16
+
+### Changed
+
+- Reworked the scanner workflow so DAT scans create shared SQLite-backed part tracker rows instead of relying on the old archived completed-list JSON flow.
+- The completed list now acts as a searchable tracker view with stage-aware rows, run numbers, latest-vs-older run coloring, and direct part-history links.
+- The main scanner now supports session-only scanned-part editing before submit, plus explicit Complete and Force Complete actions.
+- The formed scanner now loads from the latest tracker-backed run for formed parts instead of rebuilding its active list directly from resolved DAT rows.
+
+### Added
+
+- Added `run_number` support for repeated DAT scans so the same program can be run again without overwriting prior tracker history.
+- Added duplicate DAT confirmation on the main scanner when a finalized run already exists for that DAT.
+- Added `part_tracker_history` with baseline and stage-change snapshots so each tracked part can be audited over time.
+- Added a new completed-list history page for drilling into one part's recorded stage and edit history.
+- Added a `Formed` tracker stage so formed completion is represented directly in the shared tracker.
+
+### Fixed
+
+- Fixed the runtime schema migration order so `run_number` columns are added before indexes that depend on them, preventing SQLite startup failures on older databases.
+- Fixed formed-scanner routes that previously pointed at missing review/store methods by wiring them to the new per-batch edit, complete, and force-complete flow.
+- Fixed tracker updates to preserve the edited part, COM, machine, user, and location values that belong to the scanned row being submitted.
+
+### Validation
+
+- Verified the updated package with `python -m compileall Application/src/newtracker`.
+- Smoke-tested the live Flask app for the completed tracker, part-history page, formed scanner page, and tracker-backed formed DAT load path.
+
 ## 2026-04-14
 
 ### Recorded From Git

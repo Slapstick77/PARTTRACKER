@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Completed Scan List</title>
+    <title>Completed List</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
   </head>
   <body>
@@ -11,8 +11,8 @@
       <section class="top-panel list-top-panel">
         <div class="panel-title-row">
           <div class="title-block">
-            <h1>Completed Scan List</h1>
-            <p class="muted">Archived completed parts for testing review.</p>
+            <h1>Completed List</h1>
+            <p class="muted">Searchable part tracker for Prog, Cut, and Missing stages.</p>
           </div>
           <div class="header-actions">
             <a href="{{ url_for('home') }}" class="button-link">Back to Scanner</a>
@@ -23,6 +23,25 @@
             </form>
           </div>
         </div>
+
+        <form method="get" action="{{ url_for('completed_list') }}" class="tracker-search-form">
+          <label for="tracker-search">Search by Part Number or COM#</label>
+          <div class="tracker-search-row">
+            <input id="tracker-search" name="q" value="{{ search_query }}" placeholder="Enter part number, COM#, DAT, or location">
+            <button type="submit">Search</button>
+            {% if search_query %}
+            <a href="{{ url_for('completed_list') }}" class="button-link">Clear</a>
+            {% endif %}
+          </div>
+        </form>
+
+        <div class="summary-strip tracker-summary-strip">
+          <div class="summary-card"><span>Total</span><strong>{{ summary.total }}</strong></div>
+          <div class="summary-card"><span>Prog</span><strong>{{ summary.prog }}</strong></div>
+          <div class="summary-card"><span>Cut</span><strong>{{ summary.cut }}</strong></div>
+          <div class="summary-card"><span>Formed</span><strong>{{ summary.formed }}</strong></div>
+          <div class="summary-card"><span>Missing</span><strong>{{ summary.missing }}</strong></div>
+        </div>
       </section>
 
       <section class="bottom-panel list-bottom-panel">
@@ -32,7 +51,9 @@
             <table>
               <thead>
                 <tr>
-                  <th>Completed</th>
+                  <th>Updated</th>
+                  <th>Run</th>
+                  <th>Stage</th>
                   <th>Machine</th>
                   <th>User</th>
                   <th>Location</th>
@@ -44,14 +65,16 @@
                 </tr>
               </thead>
               <tbody>
-                {% for row in rows|reverse %}
+                {% for row in rows %}
                 <tr>
-                  <td>{{ row.completed_at }}</td>
+                  <td>{{ row.updated_at }}</td>
+                  <td><span class="run-pill {{ row.run_class }}">{{ row.run_number }}</span></td>
+                  <td><span class="stage-pill {{ row.stage_class }}">{{ row.stage }}</span></td>
                   <td>{{ row.machine }}</td>
                   <td>{{ row.user }}</td>
                   <td>{{ row.location }}</td>
                   <td>{{ row.nest_data }}</td>
-                  <td>{{ row.part_number }}</td>
+                  <td><a href="{{ url_for('completed_part_history', tracker_key=row.tracker_key) }}" class="history-link">{{ row.part_number }}</a></td>
                   <td>{{ row.part_revision }}</td>
                   <td>{{ row.com_number or '—' }}</td>
                   <td>{{ 'Y' if row.f_flag else 'N' }}</td>
@@ -61,7 +84,11 @@
             </table>
           </div>
           {% else %}
-            <p class="empty-state">No completed rows archived yet.</p>
+            {% if search_query %}
+            <p class="empty-state">No tracker rows match "{{ search_query }}".</p>
+            {% else %}
+            <p class="empty-state">No tracker rows yet. Scan a DAT to create Prog entries.</p>
+            {% endif %}
           {% endif %}
         </article>
       </section>

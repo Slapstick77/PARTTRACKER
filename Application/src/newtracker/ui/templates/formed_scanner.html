@@ -61,7 +61,7 @@
                   {% for item in queue %}
                     <div class="queue-token-item">
                       <strong>{{ item.dat_name }}</strong>
-                      <span>{{ item.parts | length }} formed scans queued</span>
+                      <span>Run {{ item.run_number }} · {{ item.part_count }} queued · {{ item.ready_count }} ready</span>
                     </div>
                   {% endfor %}
                 </div>
@@ -81,6 +81,7 @@
                 <header class="formed-list-header">
                   <div>
                     <h2>{{ dat_list.dat_name }}</h2>
+                    <div class="formed-com-line">Run {{ dat_list.run_number }}</div>
                     {% if dat_list.com_numbers %}
                       <div class="formed-com-stack">
                         {% for com in dat_list.com_numbers %}
@@ -94,6 +95,27 @@
                     <span>Scanned: {{ dat_list.scanned_parts | length }}</span>
                   </div>
                 </header>
+
+                <div class="action-strip formed-card-actions">
+                  <form method="post" action="{{ url_for('formed_complete_batch') }}" class="action-form">
+                    <input type="hidden" name="batch_id" value="{{ dat_list.forming_batch_id }}">
+                    <button type="submit" class="complete-button" {% if not dat_list.can_complete %}disabled{% endif %}>Complete</button>
+                  </form>
+                  {% if dat_list.can_force_complete %}
+                  <form method="post" action="{{ url_for('formed_force_complete_batch') }}" class="action-form">
+                    <input type="hidden" name="batch_id" value="{{ dat_list.forming_batch_id }}">
+                    <button type="submit" class="warning-button">Force Complete</button>
+                  </form>
+                  {% endif %}
+                  {% if dat_list.can_edit_scanned and not dat_list.scan_edit_mode %}
+                  <form method="post" action="{{ url_for('formed_edit_review') }}" class="action-form">
+                    <input type="hidden" name="batch_id" value="{{ dat_list.forming_batch_id }}">
+                    <button type="submit" class="secondary">Edit</button>
+                  </form>
+                  {% elif dat_list.scan_edit_mode %}
+                  <span class="stage-pill stage-prog">Edit Mode</span>
+                  {% endif %}
+                </div>
 
                 <div class="formed-list-columns">
                   <div>
@@ -114,13 +136,41 @@
                   <div>
                     <p class="eyebrow">Scanned</p>
                     {% if dat_list.scanned_parts %}
+                      {% if dat_list.scan_edit_mode %}
+                      <form method="post" action="{{ url_for('formed_save_review') }}" class="scanned-edit-form">
+                        <input type="hidden" name="batch_id" value="{{ dat_list.forming_batch_id }}">
+                        <div class="part-list part-list-edit">
+                          {% for part in dat_list.scanned_parts %}
+                            <div class="part-card scanned editing">
+                              <div class="edit-grid">
+                                <label>
+                                  <span>Part Number</span>
+                                  <input name="formed_scanned_{{ loop.index0 }}_part_number" value="{{ part.part_number }}">
+                                </label>
+                                <label>
+                                  <span>COM#</span>
+                                  <input name="formed_scanned_{{ loop.index0 }}_com_number" value="{{ part.com_number or '' }}">
+                                </label>
+                                <label>
+                                  <span>Location</span>
+                                  <input name="formed_scanned_{{ loop.index0 }}_location" value="{{ part.location or '' }}">
+                                </label>
+                              </div>
+                              <span class="part-line">Rev {{ part.part_revision }} · Scan {{ part.sequence }}</span>
+                            </div>
+                          {% endfor %}
+                        </div>
+                        <button type="submit" class="secondary">Done</button>
+                      </form>
+                      {% else %}
                       <div class="part-list">
                         {% for part in dat_list.scanned_parts %}
                           <div class="part-card scanned">
-                            <span class="part-line"><strong>{{ part.part_number }}</strong>{% if part.com_number %} · COM# {{ part.com_number }}{% endif %}</span>
+                            <span class="part-line"><strong>{{ part.part_number }}</strong>{% if part.com_number %} · COM# {{ part.com_number }}{% endif %} · Loc {{ part.location or '—' }} · Scan {{ part.sequence }}</span>
                           </div>
                         {% endfor %}
                       </div>
+                      {% endif %}
                     {% else %}
                       <p class="empty-state">No formed parts scanned yet.</p>
                     {% endif %}

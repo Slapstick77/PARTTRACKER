@@ -11,6 +11,7 @@ Application/data/admin_settings.json
 Application/data/completed_scan_list.json
 Application/data/import_error.log
 Application/data/import_scan_cache.json
+Application/data/.part-tracker-migrated.json
 Application/data/newtracker.db
 Application/data/scan_sessions.json
 Application/data/ui_scan_state.json

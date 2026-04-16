@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Part History</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
+  </head>
+  <body>
+    <main class="page-shell list-page-shell">
+      <section class="top-panel list-top-panel">
+        <div class="panel-title-row">
+          <div class="title-block">
+            <h1>Part History</h1>
+            <p class="muted">{{ dat_name }} · Scan {{ scan_sequence }}</p>
+          </div>
+          <div class="header-actions">
+            <a href="{{ url_for('completed_list') }}" class="button-link">Back to Completed List</a>
+            <a href="{{ url_for('home') }}" class="button-link">Main Scanner</a>
+          </div>
+        </div>
+
+        {% if current_row %}
+        <div class="summary-strip tracker-summary-strip history-summary-strip">
+          <div class="summary-card"><span>Current Part</span><strong>{{ current_row.part_number }}</strong></div>
+          <div class="summary-card"><span>Run</span><strong>{{ current_row.run_number }}</strong></div>
+          <div class="summary-card"><span>Stage</span><strong>{{ current_row.stage }}</strong></div>
+          <div class="summary-card"><span>COM#</span><strong>{{ current_row.com_number or '—' }}</strong></div>
+          <div class="summary-card"><span>Location</span><strong>{{ current_row.location or '—' }}</strong></div>
+        </div>
+        {% endif %}
+      </section>
+
+      <section class="bottom-panel list-bottom-panel">
+        <article class="list-pane list-full-pane">
+          {% if history_rows %}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Recorded</th>
+                  <th>Event</th>
+                  <th>Run</th>
+                  <th>Stage</th>
+                  <th>Part</th>
+                  <th>Rev</th>
+                  <th>COM#</th>
+                  <th>Machine</th>
+                  <th>User</th>
+                  <th>Location</th>
+                  <th>F Flag</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in history_rows %}
+                <tr>
+                  <td>{{ row.recorded_at }}</td>
+                  <td>{{ row.event_label }}</td>
+                  <td>{{ row.run_number }}</td>
+                  <td><span class="stage-pill {{ row.stage_class }}">{{ row.stage }}</span></td>
+                  <td>{{ row.part_number }}</td>
+                  <td>{{ row.part_revision }}</td>
+                  <td>{{ row.com_number or '—' }}</td>
+                  <td>{{ row.machine or '—' }}</td>
+                  <td>{{ row.user or '—' }}</td>
+                  <td>{{ row.location or '—' }}</td>
+                  <td>{{ 'Y' if row.f_flag else 'N' }}</td>
+                  <td>{{ row.notes or '—' }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
+          <p class="empty-state">No history entries recorded yet.</p>
+          {% endif %}
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

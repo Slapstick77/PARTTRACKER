@@ -75,21 +75,44 @@
           <div class="status-column">
             <div class="message-card hero-message {{ state.message_level or 'info' }}">{{ state.message }}</div>
 
+            {% if repeat_scan_pending %}
+            <div class="repeat-warning-card">
+              <p><strong>Program is Already in System.</strong></p>
+              <p>Are you sure you want continue with run {{ pending_repeat_run_number }} for {{ pending_repeat_dat }}?</p>
+              <div class="repeat-warning-actions">
+                <form method="post" action="{{ url_for('confirm_repeat_scan') }}">
+                  <button type="submit">Yes</button>
+                </form>
+                <form method="post" action="{{ url_for('cancel_repeat_scan') }}">
+                  <button type="submit" class="secondary">No</button>
+                </form>
+              </div>
+            </div>
+            {% endif %}
+
             <form method="post" action="{{ url_for('scan_field', field_name='part_scan') }}" class="scan-box part-scan-box {% if state.active_field == 'part_scan' %}active{% endif %}">
               <label>PART SCAN</label>
               <input name="value" placeholder="Scan part barcode" {% if state.active_field == 'part_scan' %}autofocus{% endif %}>
             </form>
 
             <div class="summary-strip">
+              <div class="summary-card"><span>Run</span><strong>{{ current_run_number if current_run_number else '—' }}</strong></div>
               <div class="summary-card"><span>Expected</span><strong>{{ summary.expected_total }}</strong></div>
               <div class="summary-card"><span>Scanned</span><strong>{{ summary.scanned_total }}</strong></div>
               <div class="summary-card"><span>Remaining</span><strong>{{ summary.remaining_total }}</strong></div>
             </div>
 
-            {% if can_complete %}
-            <form method="post" action="{{ url_for('complete_batch') }}" class="complete-form">
-              <button type="submit" class="complete-button">Complete</button>
-            </form>
+            {% if has_active_batch %}
+            <div class="action-strip">
+              <form method="post" action="{{ url_for('complete_batch') }}" class="complete-form action-form">
+                <button type="submit" class="complete-button" {% if not can_complete %}disabled{% endif %}>Complete</button>
+              </form>
+              {% if can_force_complete %}
+              <form method="post" action="{{ url_for('force_complete_batch') }}" class="action-form">
+                <button type="submit" class="warning-button">Force Complete</button>
+              </form>
+              {% endif %}
+            </div>
             {% endif %}
           </div>
         </div>
@@ -115,18 +138,54 @@
         </article>
 
         <article class="list-pane right-pane">
-          <div class="pane-header">
-            <p class="eyebrow">Scanned parts</p>
-            <h2>Completed scans</h2>
+          <div class="pane-header pane-header-actions">
+            <div>
+              <p class="eyebrow">Scanned parts</p>
+              <h2>Completed scans</h2>
+            </div>
+            {% if can_edit_scanned and not scan_edit_mode %}
+            <form method="post" action="{{ url_for('edit_review') }}" class="inline-action-form">
+              <button type="submit" class="secondary">Edit</button>
+            </form>
+            {% elif scan_edit_mode %}
+            <span class="stage-pill stage-prog">Edit Mode</span>
+            {% endif %}
           </div>
           {% if scanned_parts %}
+            {% if scan_edit_mode %}
+            <form method="post" action="{{ url_for('save_review') }}" class="scanned-edit-form">
+              <div class="part-list part-list-edit">
+                {% for part in scanned_parts %}
+                  <div class="part-card scanned editing">
+                    <div class="edit-grid">
+                      <label>
+                        <span>Part Number</span>
+                        <input name="scanned_{{ loop.index0 }}_part_number" value="{{ part.part_number }}">
+                      </label>
+                      <label>
+                        <span>COM#</span>
+                        <input name="scanned_{{ loop.index0 }}_com_number" value="{{ part.com_number or '' }}">
+                      </label>
+                      <label>
+                        <span>Location</span>
+                        <input name="scanned_{{ loop.index0 }}_location" value="{{ part.location or state.location_code or '' }}">
+                      </label>
+                    </div>
+                    <span class="part-line">Rev {{ part.part_revision }} · Scan {{ part.sequence }}</span>
+                  </div>
+                {% endfor %}
+              </div>
+              <button type="submit" class="secondary">Done</button>
+            </form>
+            {% else %}
             <div class="part-list">
               {% for part in scanned_parts %}
                 <div class="part-card scanned">
-                  <span class="part-line"><strong>{{ part.part_number }}</strong> · Rev {{ part.part_revision }}{% if part.com_number %} · COM {{ part.com_number }}{% endif %} · Scan {{ part.sequence }}</span>
+                  <span class="part-line"><strong>{{ part.part_number }}</strong> · Rev {{ part.part_revision }}{% if part.com_number %} · COM {{ part.com_number }}{% endif %} · Loc {{ part.location or state.location_code or '—' }} · Scan {{ part.sequence }}</span>
                 </div>
               {% endfor %}
             </div>
+            {% endif %}
           {% else %}
             <p class="empty-state">Scanned parts will show up here.</p>
           {% endif %}

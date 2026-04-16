@@ -197,6 +197,7 @@ def create_schema(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS flat_scan_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nest_id INTEGER NOT NULL,
+            run_number INTEGER NOT NULL DEFAULT 1,
             started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             completed_at TEXT,
             status TEXT NOT NULL DEFAULT 'open',
@@ -279,6 +280,51 @@ def create_schema(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (forming_batch_id) REFERENCES forming_batches(id) ON DELETE SET NULL
         );
 
+        CREATE TABLE IF NOT EXISTS part_tracker_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tracker_key TEXT NOT NULL UNIQUE,
+            flat_scan_session_id INTEGER,
+            run_number INTEGER NOT NULL DEFAULT 1,
+            dat_name TEXT NOT NULL,
+            nest_part_id INTEGER,
+            scan_sequence INTEGER NOT NULL DEFAULT 1,
+            part_number TEXT NOT NULL,
+            part_revision TEXT,
+            com_number TEXT,
+            machine TEXT,
+            user_code TEXT,
+            location TEXT,
+            requires_forming INTEGER NOT NULL DEFAULT 0,
+            stage TEXT NOT NULL DEFAULT 'Prog',
+            stage_updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (flat_scan_session_id) REFERENCES flat_scan_sessions(id) ON DELETE SET NULL,
+            FOREIGN KEY (nest_part_id) REFERENCES nest_parts(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS part_tracker_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tracker_key TEXT NOT NULL,
+            history_group_key TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            scanner_name TEXT NOT NULL DEFAULT 'system',
+            dat_name TEXT NOT NULL,
+            run_number INTEGER NOT NULL DEFAULT 1,
+            nest_part_id INTEGER,
+            scan_sequence INTEGER NOT NULL DEFAULT 1,
+            part_number TEXT NOT NULL,
+            part_revision TEXT,
+            com_number TEXT,
+            machine TEXT,
+            user_code TEXT,
+            location TEXT,
+            requires_forming INTEGER NOT NULL DEFAULT 0,
+            stage TEXT NOT NULL DEFAULT 'Prog',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            notes TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS processed_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_path TEXT NOT NULL UNIQUE,
@@ -346,6 +392,18 @@ def create_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_monitor_sources_barcode
             ON monitor_unit_sources(barcode_filename);
+
+        CREATE INDEX IF NOT EXISTS idx_part_tracker_search
+            ON part_tracker_items(part_number, com_number, stage, dat_name);
+
+        CREATE INDEX IF NOT EXISTS idx_part_tracker_updated
+            ON part_tracker_items(stage_updated_at DESC, updated_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_part_tracker_history_tracker
+            ON part_tracker_history(tracker_key, recorded_at DESC, id DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_part_tracker_history_group
+            ON part_tracker_history(history_group_key, recorded_at DESC, id DESC);
 
         CREATE INDEX IF NOT EXISTS idx_processed_files_status
             ON processed_files(status, file_type);
@@ -433,6 +491,117 @@ def create_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE resolved_nest_parts ADD COLUMN evidence_summary TEXT"
         )
 
+    existing_flat_scan_session_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(flat_scan_sessions)").fetchall()
+    }
+    if "run_number" not in existing_flat_scan_session_columns:
+        connection.execute(
+            "ALTER TABLE flat_scan_sessions ADD COLUMN run_number INTEGER NOT NULL DEFAULT 1"
+        )
+
+    existing_part_tracker_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(part_tracker_items)").fetchall()
+    }
+    if "run_number" not in existing_part_tracker_columns:
+        connection.execute(
+            "ALTER TABLE part_tracker_items ADD COLUMN run_number INTEGER NOT NULL DEFAULT 1"
+        )
+
+    connection.execute(
+        """
+        DELETE FROM part_tracker_items
+        WHERE tracker_key NOT LIKE 'legacy|%'
+          AND tracker_key NOT LIKE '%|run%|%'
+          AND EXISTS (
+              SELECT 1
+              FROM part_tracker_items existing
+              WHERE existing.tracker_key =
+                    UPPER(TRIM(COALESCE(part_tracker_items.dat_name, '')))
+                    || '|run' || CAST(COALESCE(part_tracker_items.run_number, 1) AS TEXT)
+                    || '|'
+                    || CASE
+                        WHEN part_tracker_items.nest_part_id IS NULL THEN 'legacy'
+                        ELSE CAST(part_tracker_items.nest_part_id AS TEXT)
+                       END
+                    || '|'
+                    || CAST(COALESCE(part_tracker_items.scan_sequence, 1) AS TEXT)
+          )
+        """
+    )
+    connection.execute(
+        """
+        UPDATE OR IGNORE part_tracker_items
+        SET tracker_key =
+            UPPER(TRIM(COALESCE(dat_name, '')))
+            || '|run' || CAST(COALESCE(run_number, 1) AS TEXT)
+            || '|'
+            || CASE
+                WHEN nest_part_id IS NULL THEN 'legacy'
+                ELSE CAST(nest_part_id AS TEXT)
+               END
+            || '|'
+            || CAST(COALESCE(scan_sequence, 1) AS TEXT)
+        WHERE tracker_key NOT LIKE 'legacy|%'
+          AND tracker_key NOT LIKE '%|run%|%'
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO part_tracker_history (
+            tracker_key,
+            history_group_key,
+            event_type,
+            scanner_name,
+            dat_name,
+            run_number,
+            nest_part_id,
+            scan_sequence,
+            part_number,
+            part_revision,
+            com_number,
+            machine,
+            user_code,
+            location,
+            requires_forming,
+            stage,
+            recorded_at,
+            notes
+        )
+        SELECT
+            part_tracker_items.tracker_key,
+            UPPER(TRIM(COALESCE(part_tracker_items.dat_name, '')))
+                || '|'
+                || CASE
+                    WHEN part_tracker_items.nest_part_id IS NULL THEN 'legacy'
+                    ELSE CAST(part_tracker_items.nest_part_id AS TEXT)
+                   END
+                || '|'
+                || CAST(COALESCE(part_tracker_items.scan_sequence, 1) AS TEXT),
+            'baseline',
+            'system',
+            COALESCE(part_tracker_items.dat_name, ''),
+            COALESCE(part_tracker_items.run_number, 1),
+            part_tracker_items.nest_part_id,
+            COALESCE(part_tracker_items.scan_sequence, 1),
+            COALESCE(part_tracker_items.part_number, ''),
+            COALESCE(part_tracker_items.part_revision, '-'),
+            COALESCE(part_tracker_items.com_number, ''),
+            COALESCE(part_tracker_items.machine, ''),
+            COALESCE(part_tracker_items.user_code, ''),
+            COALESCE(part_tracker_items.location, ''),
+            COALESCE(part_tracker_items.requires_forming, 0),
+            COALESCE(part_tracker_items.stage, 'Prog'),
+            COALESCE(part_tracker_items.stage_updated_at, part_tracker_items.updated_at, part_tracker_items.created_at, CURRENT_TIMESTAMP),
+            'Baseline history entry'
+        FROM part_tracker_items
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM part_tracker_history existing
+            WHERE existing.tracker_key = part_tracker_items.tracker_key
+        )
+        """
+    )
+
     connection.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_part_attributes_resolve_lookup
@@ -456,10 +625,22 @@ def create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_resolved_nest_parts_com_number
             ON resolved_nest_parts(com_number, barcode_filename);
 
+        CREATE INDEX IF NOT EXISTS idx_flat_scan_sessions_nest_run
+            ON flat_scan_sessions(nest_id, run_number DESC, id DESC);
+
         CREATE INDEX IF NOT EXISTS idx_flat_scan_items_nest_part
             ON flat_scan_items(nest_part_id, scanned_quantity);
 
         CREATE INDEX IF NOT EXISTS idx_forming_batch_items_nest_part
             ON forming_batch_items(nest_part_id, scanned_quantity);
+
+        CREATE INDEX IF NOT EXISTS idx_part_tracker_dat_sequence
+            ON part_tracker_items(dat_name, run_number, nest_part_id, scan_sequence);
+
+        CREATE INDEX IF NOT EXISTS idx_part_tracker_history_tracker
+            ON part_tracker_history(tracker_key, recorded_at DESC, id DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_part_tracker_history_group
+            ON part_tracker_history(history_group_key, recorded_at DESC, id DESC);
         """
     )
