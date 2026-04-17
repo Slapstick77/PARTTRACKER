@@ -7,12 +7,12 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='clean-ui.css') }}">
   </head>
   <body>
-    <main class="page-shell formed-page-shell">
+    <main class="page-shell formed-page-shell{% if selection_conflict %} selection-alert{% endif %}">
       <section class="top-panel">
         <div class="panel-title-row">
           <div class="title-block">
             <h1>Formed Scanner</h1>
-            <p class="muted">Load DAT token → scan formed parts across multiple active DAT lists</p>
+            <p class="muted">Load a DAT or scan a formed part to jump into the correct formed list</p>
           </div>
           <div class="header-actions">
             <a href="{{ url_for('completed_list') }}" class="button-link">Completed List</a>
@@ -55,14 +55,18 @@
             <div class="message-card hero-message {{ message_level or 'info' }}">{{ message }}</div>
 
             <div class="queue-panel">
-              <h3>Queued DAT tokens</h3>
+              <h3>Queued DAT Lists{% if queue %}<span class="queue-count-badge">{{ queue | length }}</span>{% endif %}</h3>
               {% if queue %}
                 <div class="queue-token-list">
                   {% for item in queue %}
-                    <div class="queue-token-item">
-                      <strong>{{ item.dat_name }}</strong>
-                      <span>Run {{ item.run_number }} · {{ item.part_count }} queued · {{ item.ready_count }} ready</span>
-                    </div>
+                    <form method="post" action="{{ url_for('formed_scan_dat') }}" class="queue-token-form">
+                      <input type="hidden" name="value" value="{{ item.dat_name }}">
+                      <button type="submit" class="queue-token-item" {% if item.ready_count <= 0 %}disabled{% endif %}>
+                        <span class="queue-token-com">{% if item.com_numbers %}COM# {{ item.com_numbers | join(', ') }}{% else %}COM# -{% endif %}</span>
+                        <strong class="queue-token-dat">{{ item.dat_name }}</strong>
+                        <span class="queue-token-meta">Run {{ item.run_number }} · {{ item.ready_count }}/{{ item.part_count }} ready</span>
+                      </button>
+                    </form>
                   {% endfor %}
                 </div>
               {% else %}
@@ -71,6 +75,30 @@
             </div>
           </div>
         </div>
+
+        {% if selection_conflict %}
+        <section class="formed-selection-panel">
+          <div class="formed-selection-banner">
+            <h2>Part {{ selection_conflict.part_number }} is on multiple lists</h2>
+            <p>Scan the large DAT barcode or click the correct list below.</p>
+          </div>
+
+          <div class="formed-selection-grid">
+            {% for item in selection_conflict.candidates %}
+            <form method="post" action="{{ url_for('formed_scan_dat') }}" class="selection-choice-form">
+              <input type="hidden" name="value" value="{{ item.dat_name }}">
+              <button type="submit" class="selection-choice-card{% if item.is_active %} active-choice{% endif %}">
+                <span class="selection-choice-com">{% if item.com_numbers %}COM# {{ item.com_numbers | join(', ') }}{% else %}COM# -{% endif %}</span>
+                <strong class="selection-choice-dat">{{ item.dat_name }}</strong>
+                <span class="selection-choice-meta">Run {{ item.run_number }} · {{ item.ready_count }}/{{ item.part_count }} ready{% if item.is_active %} · Loaded{% endif %}</span>
+                <div class="selection-barcode" data-barcode-value="{{ item.selection_token }}"></div>
+                <span class="selection-barcode-text">{{ item.selection_token }}</span>
+              </button>
+            </form>
+            {% endfor %}
+          </div>
+        </section>
+        {% endif %}
       </section>
 
       <section class="formed-lists-panel">
@@ -188,6 +216,104 @@
     </main>
 
     <script>
+      const code39Patterns = {
+        '0': 'nnnwwnwnn',
+        '1': 'wnnwnnnnw',
+        '2': 'nnwwnnnnw',
+        '3': 'wnwwnnnnn',
+        '4': 'nnnwwnnnw',
+        '5': 'wnnwwnnnn',
+        '6': 'nnwwwnnnn',
+        '7': 'nnnwnnwnw',
+        '8': 'wnnwnnwnn',
+        '9': 'nnwwnnwnn',
+        'A': 'wnnnnwnnw',
+        'B': 'nnwnnwnnw',
+        'C': 'wnwnnwnnn',
+        'D': 'nnnnwwnnw',
+        'E': 'wnnnwwnnn',
+        'F': 'nnwnwwnnn',
+        'G': 'nnnnnwwnw',
+        'H': 'wnnnnwwnn',
+        'I': 'nnwnnwwnn',
+        'J': 'nnnnwwwnn',
+        'K': 'wnnnnnnww',
+        'L': 'nnwnnnnww',
+        'M': 'wnwnnnnwn',
+        'N': 'nnnnwnnww',
+        'O': 'wnnnwnnwn',
+        'P': 'nnwnwnnwn',
+        'Q': 'nnnnnnwww',
+        'R': 'wnnnnnwwn',
+        'S': 'nnwnnnwwn',
+        'T': 'nnnnwnwwn',
+        'U': 'wwnnnnnnw',
+        'V': 'nwwnnnnnw',
+        'W': 'wwwnnnnnn',
+        'X': 'nwnnwnnnw',
+        'Y': 'wwnnwnnnn',
+        'Z': 'nwwnwnnnn',
+        '-': 'nwnnnnwnw',
+        '.': 'wwnnnnwnn',
+        ' ': 'nwwnnnwnn',
+        '$': 'nwnwnwnnn',
+        '/': 'nwnwnnnwn',
+        '+': 'nwnnnwnwn',
+        '%': 'nnnwnwnwn',
+        '*': 'nwnnwnwnn'
+      };
+
+      function renderCode39Barcode(container) {
+        const rawValue = String(container.dataset.barcodeValue || '').trim().toUpperCase();
+        if (!rawValue) {
+          return;
+        }
+
+        const encoded = `*${rawValue}*`;
+        for (const char of encoded) {
+          if (!code39Patterns[char]) {
+            container.textContent = rawValue;
+            return;
+          }
+        }
+
+        const svgNs = 'http://www.w3.org/2000/svg';
+        const narrow = 4;
+        const wide = 10;
+        const gap = 4;
+        const height = 96;
+        let cursor = 16;
+
+        const svg = document.createElementNS(svgNs, 'svg');
+        svg.setAttribute('role', 'img');
+        svg.setAttribute('aria-label', rawValue);
+
+        encoded.split('').forEach((char) => {
+          const pattern = code39Patterns[char];
+          pattern.split('').forEach((token, index) => {
+            const width = token === 'w' ? wide : narrow;
+            if (index % 2 === 0) {
+              const rect = document.createElementNS(svgNs, 'rect');
+              rect.setAttribute('x', String(cursor));
+              rect.setAttribute('y', '0');
+              rect.setAttribute('width', String(width));
+              rect.setAttribute('height', String(height));
+              rect.setAttribute('fill', '#0f172a');
+              svg.appendChild(rect);
+            }
+            cursor += width;
+            if (index < pattern.length - 1) {
+              cursor += gap;
+            }
+          });
+          cursor += wide;
+        });
+
+        svg.setAttribute('viewBox', `0 0 ${cursor + 16} ${height}`);
+        svg.setAttribute('preserveAspectRatio', 'none');
+        container.replaceChildren(svg);
+      }
+
       document.querySelectorAll('.scan-box input').forEach((input) => {
         input.addEventListener('keydown', (event) => {
           if (event.key === 'Enter') {
@@ -195,6 +321,8 @@
           }
         });
       });
+
+      document.querySelectorAll('.selection-barcode').forEach(renderCode39Barcode);
     </script>
   </body>
 </html>

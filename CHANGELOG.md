@@ -2,6 +2,32 @@
 
 This file tracks notable changes made to the NEWTRACKER application during active development.
 
+## 2026-04-17
+
+### Changed
+
+- The monitor dashboard's CSV estimate now uses raw imported `nest_comparison` rows from `job_parts` instead of the collapsed `part_attributes.quantity_per` value.
+- The CSV estimate now follows the same source ignore rules used by imports, so ignored paths and nested `OLD` folders no longer inflate monitor totals.
+- The formed scanner queue now renders as a condensed COM-first card grid that stays usable when many DAT lists are waiting.
+- Formed scanner success feedback now stays on the page message card so DAT-driven loads, automatic part-driven loads, and ambiguity handling all report the correct state.
+
+### Added
+
+- Added direct part-first list selection on the formed scanner so scanning a part can automatically load the matching DAT list when there is a unique match.
+- Added a red conflict state on the formed scanner for ambiguous part scans, with large clickable and scannable DAT choices that can resolve the correct list.
+- Added a filtered `Estimated CSV Nested Parts` monitor metric that excludes `Not Nested` rows and `Eclipse` rows on `Walls_Channels`.
+
+### Fixed
+
+- Fixed monitor CSV estimate undercounting caused by repeated raw CSV rows collapsing to `1` through the `part_attributes` upsert key.
+- Fixed monitor CSV estimate overcounting caused by stale `OLD` programming-folder copies being included in the display-only estimate.
+
+### Validation
+
+- Verified the updated package with `python -m compileall Application/src/newtracker`.
+- Smoke-tested formed scanner state loading with `UiStateStore(session_key='formed-ui-smoke').formed_context()`.
+- Verified the Flask app factory still initializes via `from newtracker.ui_app import create_ui_app; create_ui_app()`.
+
 ## 2026-04-16
 
 ### Changed

@@ -597,6 +597,20 @@ tbody tr:nth-child(even) {
   grid-template-rows: auto 1fr;
 }
 
+.formed-page-shell.selection-alert {
+  background: linear-gradient(180deg, #fff1f2 0%, #fff7ed 100%);
+}
+
+.formed-page-shell.selection-alert .top-panel,
+.formed-page-shell.selection-alert .formed-lists-panel {
+  border-color: #fca5a5;
+  box-shadow: 0 18px 50px rgba(185, 28, 28, 0.14);
+}
+
+.formed-page-shell.selection-alert .top-panel {
+  background: linear-gradient(180deg, #fff4f5 0%, #ffffff 55%);
+}
+
 .formed-controls-layout {
   grid-template-columns: 420px minmax(360px, 1fr);
 }
@@ -611,25 +625,168 @@ tbody tr:nth-child(even) {
 .queue-panel h3 {
   margin: 0 0 10px;
   font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.queue-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 0.72rem;
+  font-weight: 800;
 }
 
 .queue-token-list {
   display: grid;
   gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  max-height: 340px;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .queue-token-item {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
+  width: 100%;
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: #ffffff;
+  color: var(--text);
 }
 
-.queue-token-item strong {
+.queue-token-item:disabled {
+  cursor: not-allowed;
+  background: #f8fafc;
+  color: var(--muted);
+}
+
+.queue-token-com {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--brand);
+}
+
+.queue-token-dat {
   font-family: Consolas, "Courier New", monospace;
+  font-size: 0.92rem;
+  line-height: 1.2;
+}
+
+.queue-token-meta {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.formed-selection-panel {
+  margin-top: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.formed-selection-banner {
+  border: 2px solid #fca5a5;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #fee2e2 0%, #fff7ed 100%);
+  padding: 16px 18px;
+}
+
+.formed-selection-banner h2 {
+  margin: 0 0 6px;
+  font-size: 1.45rem;
+  color: #991b1b;
+}
+
+.formed-selection-banner p {
+  margin-bottom: 0;
+  color: #7f1d1d;
+  font-weight: 700;
+}
+
+.formed-selection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.selection-choice-form {
+  margin: 0;
+}
+
+.selection-choice-card {
+  width: 100%;
+  display: grid;
+  gap: 10px;
+  justify-items: stretch;
+  text-align: left;
+  border: 2px solid #fca5a5;
+  border-radius: 18px;
+  padding: 16px;
+  background: #ffffff;
+  color: var(--text);
+}
+
+.selection-choice-card:hover {
+  border-color: #ef4444;
+  box-shadow: 0 16px 32px rgba(239, 68, 68, 0.14);
+}
+
+.selection-choice-card.active-choice {
+  border-color: #2563eb;
+  box-shadow: 0 18px 36px rgba(37, 99, 235, 0.14);
+}
+
+.selection-choice-com {
+  font-size: 0.92rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #b91c1c;
+}
+
+.selection-choice-dat {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 1.5rem;
+  line-height: 1.05;
+}
+
+.selection-choice-meta {
+  font-size: 0.88rem;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.selection-barcode {
+  min-height: 96px;
+  border: 1px solid #d1d5db;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 8px;
+}
+
+.selection-barcode svg {
+  display: block;
+  width: 100%;
+  height: 96px;
+}
+
+.selection-barcode-text {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.88rem;
+  letter-spacing: 0.08em;
+  text-align: center;
+  color: var(--muted);
 }
 
 .formed-lists-panel {
@@ -1191,6 +1348,11 @@ th {
   .formed-list-columns,
   .monitor-stat-grid,
   .monitor-metric-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .queue-token-list,
+  .formed-selection-grid {
     grid-template-columns: 1fr;
   }
 

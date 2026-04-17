@@ -248,8 +248,6 @@ def create_ui_app() -> Flask:
         except UiStateError as exc:
             store.invalidate_formed_scan(str(exc))
             flash(str(exc), "error")
-        else:
-            flash("DAT token accepted for formed scanning.", "success")
         return redirect(url_for("formed_home"))
 
     @app.post("/formed/scan-part")
@@ -259,8 +257,6 @@ def create_ui_app() -> Flask:
         except UiStateError as exc:
             store.invalidate_formed_scan(str(exc))
             flash(str(exc), "error")
-        else:
-            flash("Formed part accepted.", "success")
         return redirect(url_for("formed_home"))
 
     @app.post("/formed/complete")

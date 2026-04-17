@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import DATA_DIR, get_connection
+from .importer import is_ignored_source_path
 from .persistence import atomic_write_json, read_json_file
 from .schema import create_schema
 
@@ -114,6 +115,8 @@ class UiStateStore:
             "formed_active_field": "dat_token",
             "formed_message": "Scan DAT token to load formed list",
             "formed_message_level": "info",
+            "formed_selection_part": "",
+            "formed_selection_candidates": [],
         }
 
     def read(self) -> dict[str, Any]:
@@ -727,6 +730,8 @@ class UiStateStore:
         reset_state["formed_active_field"] = state.get("formed_active_field", "dat_token")
         reset_state["formed_message"] = state.get("formed_message", "Scan DAT token to load formed list")
         reset_state["formed_message_level"] = state.get("formed_message_level", "info")
+        reset_state["formed_selection_part"] = state.get("formed_selection_part", "")
+        reset_state["formed_selection_candidates"] = list(state.get("formed_selection_candidates", []))
         if reset_state["machine_code"] and reset_state["user_code"] and reset_state["location_code"]:
             reset_state["active_field"] = "nest_data"
         else:
@@ -1597,6 +1602,7 @@ class UiStateStore:
             "run_number": int(queued_rows[0]["run_number"] or 1),
             "part_count": len(queued_rows),
             "ready_count": ready_count,
+            "com_numbers": self._extract_com_numbers_from_rows(queued_rows),
         }
 
     @staticmethod
@@ -1613,6 +1619,7 @@ class UiStateStore:
             "run_number": int(preview.get("run_number") or 1),
             "part_count": int(preview.get("part_count") or 0),
             "ready_count": int(preview.get("ready_count") or 0),
+            "com_numbers": list(preview.get("com_numbers") or []),
         }
         queue_index = next(
             (index for index, item in enumerate(state.get("formed_queue", [])) if str(item.get("dat_name") or "") == dat_name),
@@ -1631,6 +1638,197 @@ class UiStateStore:
         if any(str(item.get("dat_name") or "") == dat_name for item in state.get("formed_active_lists", [])):
             return
         self._upsert_formed_queue_entry(state, preview)
+
+    @staticmethod
+    def _clear_formed_selection(state: dict[str, Any]) -> None:
+        state["formed_selection_part"] = ""
+        state["formed_selection_candidates"] = []
+
+    @staticmethod
+    def _sort_formed_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            candidates,
+            key=lambda item: (
+                0 if item.get("is_active") else 1,
+                str((item.get("com_numbers") or [""])[0] or ""),
+                str(item.get("dat_name") or ""),
+            ),
+        )
+
+    @staticmethod
+    def _build_formed_candidate(
+        dat_name: str,
+        run_number: int,
+        com_numbers: list[str],
+        part_count: int,
+        ready_count: int,
+        *,
+        is_active: bool,
+    ) -> dict[str, Any]:
+        return {
+            "dat_name": str(dat_name or ""),
+            "run_number": int(run_number or 1),
+            "com_numbers": [str(value or "").strip() for value in com_numbers if str(value or "").strip()],
+            "part_count": int(part_count or 0),
+            "ready_count": int(ready_count or 0),
+            "is_active": bool(is_active),
+            "selection_token": str(dat_name or ""),
+        }
+
+    def _build_formed_candidate_from_preview(self, preview: dict[str, Any], *, is_active: bool) -> dict[str, Any]:
+        return self._build_formed_candidate(
+            str(preview.get("dat_name") or ""),
+            int(preview.get("run_number") or 1),
+            list(preview.get("com_numbers") or []),
+            int(preview.get("part_count") or 0),
+            int(preview.get("ready_count") or 0),
+            is_active=is_active,
+        )
+
+    def _build_formed_candidate_from_active(self, dat_list: dict[str, Any]) -> dict[str, Any]:
+        expected_parts = list(dat_list.get("expected_parts") or [])
+        scanned_parts = list(dat_list.get("scanned_parts") or [])
+        return self._build_formed_candidate(
+            str(dat_list.get("dat_name") or ""),
+            int(dat_list.get("run_number") or 1),
+            list(dat_list.get("com_numbers") or []),
+            len(expected_parts) + len(scanned_parts),
+            len(expected_parts),
+            is_active=True,
+        )
+
+    def _scan_part_into_formed_list(self, state: dict[str, Any], dat_name: str, part_number: str) -> dict[str, Any]:
+        for dat_list in state.get("formed_active_lists", []):
+            if str(dat_list.get("dat_name") or "") != dat_name:
+                continue
+            expected = dat_list.get("expected_parts", [])
+            idx = next((index for index, part in enumerate(expected) if str(part.get("part_number") or "") == part_number), None)
+            if idx is None:
+                raise UiStateError(f"Part {part_number} is not waiting on {dat_name}.")
+            row = expected.pop(idx)
+            dat_list.setdefault("scanned_parts", []).append(row)
+            self._increment_forming_batch_item(dat_list.get("forming_batch_id"), row)
+            return dat_list
+        raise UiStateError(f"List {dat_name} is not loaded in this session.")
+
+    def _load_queued_formed_part_candidates(self, state: dict[str, Any], part_number: str) -> list[dict[str, Any]]:
+        active_dats = {
+            str(item.get("dat_name") or "").strip().upper()
+            for item in state.get("formed_active_lists", [])
+            if str(item.get("dat_name") or "").strip()
+        }
+
+        with get_connection() as connection:
+            create_schema(connection)
+            rows = connection.execute(
+                """
+                WITH latest_runs AS (
+                    SELECT UPPER(TRIM(dat_name)) AS dat_key, MAX(run_number) AS latest_run
+                    FROM part_tracker_items
+                    WHERE requires_forming = 1
+                    GROUP BY UPPER(TRIM(dat_name))
+                )
+                SELECT DISTINCT pti.dat_name
+                FROM part_tracker_items pti
+                JOIN latest_runs lr
+                  ON UPPER(TRIM(pti.dat_name)) = lr.dat_key
+                 AND pti.run_number = lr.latest_run
+                WHERE pti.requires_forming = 1
+                  AND UPPER(TRIM(pti.part_number)) = UPPER(TRIM(?))
+                  AND UPPER(TRIM(COALESCE(pti.stage, ''))) IN ('PROG', 'CUT')
+                ORDER BY UPPER(TRIM(pti.dat_name))
+                """,
+                (part_number,),
+            ).fetchall()
+
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            dat_name = str(row["dat_name"] or "").strip().upper()
+            if not dat_name or dat_name in active_dats or dat_name in seen:
+                continue
+            preview = self._load_formed_queue_preview(dat_name)
+            if preview is None or int(preview.get("ready_count") or 0) <= 0:
+                continue
+            candidates.append(self._build_formed_candidate_from_preview(preview, is_active=False))
+            seen.add(dat_name)
+        return self._sort_formed_candidates(candidates)
+
+    def _set_formed_selection(self, state: dict[str, Any], part_number: str, candidates: list[dict[str, Any]]) -> None:
+        state["formed_selection_part"] = part_number
+        state["formed_selection_candidates"] = self._sort_formed_candidates(candidates)
+        state["formed_active_field"] = "part_scan"
+        state["formed_message"] = f"Part {part_number} is on multiple lists. Scan or click the correct DAT list below."
+        state["formed_message_level"] = "error"
+
+    def _select_formed_list(self, state: dict[str, Any], dat_token: str) -> dict[str, Any]:
+        token = self._normalize_dat_token(dat_token)
+        if not token:
+            raise UiStateError("DAT token was blank.")
+
+        pending_part = str(state.get("formed_selection_part") or "").strip()
+        pending_candidates = {
+            str(item.get("dat_name") or "").strip().upper()
+            for item in state.get("formed_selection_candidates", [])
+            if str(item.get("dat_name") or "").strip()
+        }
+        if pending_part and pending_candidates and token not in pending_candidates:
+            raise UiStateError(f"Part {pending_part} is on multiple lists. Choose one of the highlighted DAT lists.")
+
+        active_entry = next(
+            (item for item in state.get("formed_active_lists", []) if str(item.get("dat_name") or "").strip().upper() == token),
+            None,
+        )
+        if active_entry is None:
+            preview = self._load_formed_queue_preview(token)
+            if preview is None:
+                raise UiStateError(f"No formed parts are waiting for {token} in the latest run.")
+            if int(preview.get("ready_count") or 0) <= 0:
+                raise UiStateError(f"{token} is queued for forming, but cut stage is not complete yet.")
+
+            snapshot = self._load_forming_batch_snapshot(token, mark_started=True)
+            if snapshot is None:
+                raise UiStateError(f"No formed parts are ready for {token}.")
+
+            self._apply_forming_snapshot_to_state(state, snapshot, mark_loaded=True)
+            self._remove_formed_queue_entry(state, token)
+            active_entry = next(
+                (item for item in state.get("formed_active_lists", []) if str(item.get("dat_name") or "").strip().upper() == token),
+                None,
+            )
+
+        if active_entry is None:
+            raise UiStateError(f"Unable to load formed list for {token}.")
+
+        if pending_part:
+            self._scan_part_into_formed_list(state, str(active_entry.get("dat_name") or token), pending_part)
+            self._clear_formed_selection(state)
+            state["formed_active_field"] = "part_scan"
+            state["formed_message"] = f"Selected {active_entry['dat_name']}. Accepted {pending_part}."
+            state["formed_message_level"] = "success"
+            return active_entry
+
+        self._clear_formed_selection(state)
+        state["formed_active_field"] = "part_scan"
+        state["formed_message"] = f"Loaded formed run {int(active_entry.get('run_number') or 1)} for {active_entry['dat_name']}. Scan formed parts."
+        state["formed_message_level"] = "info"
+        return active_entry
+
+    def _try_handle_formed_selection_scan(self, state: dict[str, Any], raw_value: str) -> bool:
+        if not state.get("formed_selection_candidates"):
+            return False
+        token = self._normalize_dat_token(raw_value)
+        if not token:
+            return False
+        candidates = {
+            str(item.get("dat_name") or "").strip().upper()
+            for item in state.get("formed_selection_candidates", [])
+            if str(item.get("dat_name") or "").strip()
+        }
+        if token not in candidates:
+            return False
+        self._select_formed_list(state, token)
+        return True
 
     @staticmethod
     def _normalize_dat_token(raw: str) -> str:
@@ -1732,35 +1930,59 @@ class UiStateStore:
             payload["can_force_complete"] = bool(payload.get("expected_parts") or payload.get("scanned_parts"))
             payload["can_edit_scanned"] = bool(payload.get("scanned_parts"))
             lists.append(payload)
+
+        selection_candidates: list[dict[str, Any]] = []
+        selection_part = str(state.get("formed_selection_part") or "").strip()
+        if selection_part and state.get("formed_selection_candidates"):
+            for candidate in state.get("formed_selection_candidates", []):
+                dat_name = str(candidate.get("dat_name") or "").strip()
+                if not dat_name:
+                    continue
+                active_entry = next(
+                    (item for item in state.get("formed_active_lists", []) if str(item.get("dat_name") or "").strip() == dat_name),
+                    None,
+                )
+                if active_entry is not None:
+                    selection_candidates.append(self._build_formed_candidate_from_active(active_entry))
+                    continue
+                preview = self._load_formed_queue_preview(dat_name)
+                if preview is None or int(preview.get("ready_count") or 0) <= 0:
+                    continue
+                selection_candidates.append(self._build_formed_candidate_from_preview(preview, is_active=False))
+            selection_candidates = self._sort_formed_candidates(selection_candidates)
+            if selection_candidates != list(state.get("formed_selection_candidates", [])):
+                state["formed_selection_candidates"] = selection_candidates
+                changed = True
+            if not selection_candidates:
+                self._clear_formed_selection(state)
+                selection_part = ""
+                changed = True
+
+        if changed:
+            self.write(state)
+
+        queue = self._sort_formed_candidates(
+            [self._build_formed_candidate_from_preview(item, is_active=False) for item in state.get("formed_queue", [])]
+        )
         return {
-            "queue": list(state["formed_queue"]),
+            "queue": queue,
             "lists": lists,
             "active_field": state["formed_active_field"],
             "message": state["formed_message"],
             "message_level": state["formed_message_level"],
+            "selection_conflict": (
+                {
+                    "part_number": selection_part,
+                    "candidates": selection_candidates,
+                }
+                if selection_part and selection_candidates
+                else None
+            ),
         }
 
     def formed_scan_dat(self, dat_token: str) -> dict[str, Any]:
         state = self.read()
-        token = self._normalize_dat_token(dat_token)
-        if not token:
-            raise UiStateError("DAT token was blank.")
-
-        preview = self._load_formed_queue_preview(token)
-        if preview is None:
-            raise UiStateError(f"No formed parts are waiting for {token} in the latest run.")
-        if int(preview.get("ready_count") or 0) <= 0:
-            raise UiStateError(f"{token} is queued for forming, but cut stage is not complete yet.")
-
-        snapshot = self._load_forming_batch_snapshot(token, mark_started=True)
-        if snapshot is None:
-            raise UiStateError(f"No formed parts are ready for {token}.")
-
-        self._apply_forming_snapshot_to_state(state, snapshot, mark_loaded=True)
-        self._remove_formed_queue_entry(state, token)
-        state["formed_active_field"] = "part_scan"
-        state["formed_message"] = f"Loaded formed run {snapshot['run_number']} for {snapshot['dat_name']}. Scan formed parts."
-        state["formed_message_level"] = "info"
+        self._select_formed_list(state, dat_token)
         self.write(state)
         return state
 
@@ -1796,6 +2018,51 @@ class UiStateStore:
             ordered.append(raw)
         return ordered
 
+    @staticmethod
+    def _should_ignore_csv_estimate_path(path_value: str | None) -> bool:
+        raw = str(path_value or "").strip()
+        if not raw:
+            return False
+        path = Path(raw)
+        if is_ignored_source_path(path):
+            return True
+        return any(str(part).casefold() == "old" for part in path.parts[:-1])
+
+    def _load_csv_estimate_total(self, connection, com_number: str) -> int:
+        rows = connection.execute(
+            """
+            SELECT
+                jp.source_file_path,
+                COALESCE(jp.quantity, 0) AS quantity,
+                COALESCE(jp.nested_on, '') AS nested_on,
+                COALESCE(pa.collection_cart, '') AS collection_cart
+            FROM job_parts jp
+            JOIN job_folders jf ON jf.id = jp.job_folder_id
+            LEFT JOIN part_attributes pa
+              ON pa.source_file_path = jp.source_file_path
+             AND COALESCE(pa.com_number, '') = COALESCE(jf.com_number, '')
+             AND pa.part_number = jp.part_number
+             AND COALESCE(pa.rev_level, '') = COALESCE(jp.revision, '')
+             AND COALESCE(pa.build_date, '') = COALESCE(jp.build_date_code, '')
+            WHERE jf.com_number = ?
+              AND jp.source_type = 'nest_comparison'
+            """,
+            (com_number,),
+        ).fetchall()
+
+        total = 0
+        for row in rows:
+            if self._should_ignore_csv_estimate_path(row["source_file_path"]):
+                continue
+            nested_on = str(row["nested_on"] or "").strip().casefold()
+            if nested_on == "not nested":
+                continue
+            collection_cart = str(row["collection_cart"] or "").strip().casefold()
+            if nested_on == "eclipse" and collection_cart == "walls_channels":
+                continue
+            total += int(row["quantity"] or 0)
+        return total
+
     def _load_monitor_totals(self, connection, com_number: str) -> dict[str, int]:
         row = connection.execute(
             """
@@ -1809,12 +2076,14 @@ class UiStateStore:
             """,
             (com_number,),
         ).fetchone()
+        csv_total_parts = self._load_csv_estimate_total(connection, com_number)
 
         return {
             "total_parts": int(row["total_parts"] or 0) if row is not None else 0,
             "total_forming_parts": int(row["total_forming_parts"] or 0) if row is not None else 0,
             "dat_count": int(row["dat_count"] or 0) if row is not None else 0,
             "distinct_parts": int(row["distinct_parts"] or 0) if row is not None else 0,
+            "csv_total_parts": csv_total_parts,
         }
 
     def _load_monitor_progress(self, connection, com_number: str) -> dict[str, int]:
@@ -1907,6 +2176,7 @@ class UiStateStore:
                         "source_dats": source_dats,
                         "dat_count": totals["dat_count"],
                         "distinct_parts": totals["distinct_parts"],
+                        "csv_total_parts": totals["csv_total_parts"],
                         "total_parts": total_parts,
                         "flat_done": flat_done,
                         "remaining_parts": remaining_parts,
@@ -1943,6 +2213,44 @@ class UiStateStore:
         if not cleaned:
             raise UiStateError("Scanned value was blank.")
 
+        if self._try_handle_formed_selection_scan(state, cleaned):
+            self.write(state)
+            return state
+
+        if state.get("formed_selection_candidates"):
+            pending_part = str(state.get("formed_selection_part") or "").strip()
+            raise UiStateError(f"Part {pending_part} is on multiple lists. Scan or click one of the highlighted DAT lists.")
+
+        active_candidates = self._sort_formed_candidates(
+            [
+                self._build_formed_candidate_from_active(dat_list)
+                for dat_list in state.get("formed_active_lists", [])
+                if any(str(part.get("part_number") or "") == cleaned for part in dat_list.get("expected_parts", []))
+            ]
+        )
+        queued_candidates = self._load_queued_formed_part_candidates(state, cleaned)
+        all_candidates = self._sort_formed_candidates(active_candidates + queued_candidates)
+
+        if len(all_candidates) > 1:
+            self._set_formed_selection(state, cleaned, all_candidates)
+            self.write(state)
+            return state
+
+        if len(all_candidates) == 1:
+            candidate = all_candidates[0]
+            if candidate.get("is_active"):
+                self._scan_part_into_formed_list(state, str(candidate.get("dat_name") or ""), cleaned)
+                self._clear_formed_selection(state)
+                state["formed_active_field"] = "part_scan"
+                state["formed_message"] = f"Accepted {cleaned} into {candidate['dat_name']}."
+                state["formed_message_level"] = "success"
+            else:
+                state["formed_selection_part"] = cleaned
+                state["formed_selection_candidates"] = [candidate]
+                self._select_formed_list(state, str(candidate.get("dat_name") or ""))
+            self.write(state)
+            return state
+
         matched = False
         matched_dat = None
         for dat_list in state["formed_active_lists"]:
@@ -1959,10 +2267,12 @@ class UiStateStore:
         if not matched:
             loaded_dat, _ = self._try_load_queued_dat_into_formed(state, cleaned)
             if loaded_dat:
+                self._clear_formed_selection(state)
                 self.write(state)
                 return state
             raise UiStateError(f"Part {cleaned} is not expected in any active formed list.")
 
+        self._clear_formed_selection(state)
         state["formed_active_field"] = "part_scan"
         state["formed_message"] = f"Accepted {cleaned} into {matched_dat}."
         state["formed_message_level"] = "success"
