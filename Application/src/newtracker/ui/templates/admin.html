@@ -131,6 +131,39 @@
               <p class="muted helper-text">Off keeps the current flow. Auto Complete moves parts only. Full Auto also finishes the batch.</p>
             </section>
 
+            <section class="folder-card">
+              <div class="folder-card-header">
+                <div>
+                  <h3>Debug error reports</h3>
+                  <p class="muted">Save future tracebacks into files you can send back during debugging.</p>
+                </div>
+              </div>
+
+              <div class="toggle-row">
+                <label class="toggle-option">
+                  <input type="radio" name="debug_enabled" value="off" {% if not settings.debug_enabled %}checked{% endif %}>
+                  <span>
+                    <strong>Off</strong>
+                    <small>Do not save detailed traceback report files.</small>
+                  </span>
+                </label>
+                <label class="toggle-option">
+                  <input type="radio" name="debug_enabled" value="on" {% if settings.debug_enabled %}checked{% endif %}>
+                  <span>
+                    <strong>On</strong>
+                    <small>Save request and import failures as timestamped traceback files.</small>
+                  </span>
+                </label>
+              </div>
+
+              <label class="settings-field">
+                <span>Error report folder</span>
+                <input name="error_report_folder" value="{{ settings.error_report_folder }}" placeholder="Enter folder path for saved error reports">
+              </label>
+              <p class="muted helper-text">Changing this folder applies immediately for saved reports. Flask debug mode follows this switch after the next app restart.</p>
+              <p class="muted helper-text">Current output folder: {{ debug_reports.folder }}</p>
+            </section>
+
             <button type="submit">Save Settings</button>
           </form>
         </article>
@@ -157,6 +190,34 @@
               <p class="monitor-error">The admin password is still using the temporary bootstrap value.</p>
               {% endif %}
               <a href="{{ url_for('admin_security') }}" class="button-link">Open Security Settings</a>
+            </section>
+
+            <section class="admin-action-card status-card">
+              <h3>Error reports</h3>
+              <p class="muted">Use this folder to collect traceback files from future failures.</p>
+              <div class="status-grid">
+                <div><span>Debug capture</span><strong>{{ 'On' if debug_reports.enabled else 'Off' }}</strong></div>
+                <div><span>Recent files</span><strong>{{ debug_reports.recent_reports | length }}</strong></div>
+              </div>
+              <p class="muted report-path">{{ debug_reports.folder }}</p>
+              {% if not debug_reports.folder_exists %}
+              <p class="muted">The folder will be created automatically when the first report is saved.</p>
+              {% endif %}
+              {% if debug_reports.recent_reports %}
+              <div class="source-summary-block">
+                <h4>Recent reports</h4>
+                <ul class="report-list">
+                  {% for report in debug_reports.recent_reports %}
+                  <li class="report-row">
+                    <a href="{{ url_for('admin_download_error_report', report_name=report.name) }}" class="history-link">{{ report.name }}</a>
+                    <span class="report-meta">{{ report.updated_at }} · {{ report.size_label }}</span>
+                  </li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% else %}
+              <p class="muted">No error report files have been saved yet.</p>
+              {% endif %}
             </section>
 
             <form method="post" action="{{ url_for('admin_import_now') }}" class="admin-action-card">

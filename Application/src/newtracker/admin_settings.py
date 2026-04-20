@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sqlite3
 import threading
 import time
 import traceback
@@ -12,6 +13,7 @@ from typing import Any, Mapping, cast
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .db import APP_ROOT, get_connection
+from .error_reports import default_error_report_directory, resolve_error_report_directory, write_error_report
 from .importer import clear_scan_cache, import_paths, is_immutable_source_path
 from .persistence import atomic_write_json, atomic_write_text, read_json_file
 from .schema import create_schema
@@ -156,6 +158,8 @@ class AdminSettingsStore:
         return {
             "poll_interval_minutes": 0,
             "scanner_auto_mode": MAIN_SCANNER_AUTO_MODE_OFF,
+            "debug_enabled": False,
+            "error_report_folder": str(default_error_report_directory()),
             "folders": {key: dict(value) for key, value in DEFAULT_SOURCE_FOLDERS.items()},
             "last_import": self._default_run_result("No import has been run yet."),
             "security": self._default_security_state(),
@@ -182,6 +186,8 @@ class AdminSettingsStore:
             persisted = {
                 "poll_interval_minutes": state.get("poll_interval_minutes", 0),
                 "scanner_auto_mode": self.scanner_auto_mode(state),
+                "debug_enabled": self.debug_enabled(state),
+                "error_report_folder": self.error_report_folder(state),
                 "folders": state.get("folders", {}),
                 "last_import": state.get("last_import", self._default_state()["last_import"]),
                 "security": state.get("security", self._default_state()["security"]),
@@ -194,6 +200,18 @@ class AdminSettingsStore:
         if raw not in VALID_MAIN_SCANNER_AUTO_MODES:
             return MAIN_SCANNER_AUTO_MODE_OFF
         return raw
+
+    def debug_enabled(self, state: dict[str, Any] | None = None) -> bool:
+        current = state or self.read()
+        return bool(current.get("debug_enabled", False))
+
+    def error_report_folder(self, state: dict[str, Any] | None = None) -> str:
+        current = state or self.read()
+        return str(current.get("error_report_folder") or default_error_report_directory())
+
+    def error_report_directory(self, state: dict[str, Any] | None = None) -> Path:
+        current = state or self.read()
+        return resolve_error_report_directory(self.error_report_folder(current))
 
     def admin_username(self, state: dict[str, Any] | None = None) -> str:
         current = state or self.read()
@@ -306,6 +324,17 @@ class AdminSettingsStore:
         if scanner_auto_mode not in VALID_MAIN_SCANNER_AUTO_MODES:
             raise AdminSettingsError("Main scanner auto mode was invalid.")
         state["scanner_auto_mode"] = scanner_auto_mode
+
+        debug_enabled = str(form.get("debug_enabled", "off")).strip().lower() == "on"
+        report_directory = resolve_error_report_directory(str(form.get("error_report_folder", "")).strip())
+        try:
+            report_directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise AdminSettingsError("Error report folder could not be created. Check the path and permissions.") from exc
+        if not report_directory.is_dir():
+            raise AdminSettingsError("Error report folder must point to a folder.")
+        state["debug_enabled"] = debug_enabled
+        state["error_report_folder"] = str(report_directory)
 
         for folder_key in state["folders"]:
             mode = str(form.get(f"source_mode_{folder_key}", "test")).strip().lower()
@@ -442,14 +471,20 @@ class AdminSettingsStore:
             connection.commit()
 
     def latest_import_result(self, state: dict[str, Any] | None = None) -> dict[str, Any]:
-        with get_connection() as connection:
-            create_schema(connection)
-            row = connection.execute(
-                "SELECT * FROM import_runs ORDER BY id DESC LIMIT 1"
-            ).fetchone()
+        current = state or self.read()
+        if self.import_monitor().get("status") == "running":
+            return dict(current.get("last_import", self._default_state()["last_import"]))
+
+        try:
+            with get_connection() as connection:
+                row = connection.execute(
+                    "SELECT * FROM import_runs ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+        except sqlite3.OperationalError:
+            return dict(current.get("last_import", self._default_state()["last_import"]))
+
         if row is not None:
             return self._import_run_row_to_result(row)
-        current = state or self.read()
         return dict(current.get("last_import", self._default_state()["last_import"]))
 
     def mark_interrupted_import_runs(self) -> int:
@@ -700,6 +735,22 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str) -> dict[str, An
         except Exception as exc:
             trace_text = traceback.format_exc()
             atomic_write_text(IMPORT_ERROR_LOG_PATH, trace_text, encoding="utf-8")
+            if store.debug_enabled(state):
+                try:
+                    write_error_report(
+                        directory=store.error_report_directory(state),
+                        category="import-error",
+                        summary=f"Import failed: {exc}",
+                        traceback_text=trace_text,
+                        extra={
+                            "trigger": trigger,
+                            "started_at": started_at,
+                            "active_paths": active_path_strings,
+                            "missing_paths": missing_paths,
+                        },
+                    )
+                except OSError:
+                    pass
             store.finish_import_run(
                 run_id,
                 status="error",

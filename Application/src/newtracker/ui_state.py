@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -376,81 +377,96 @@ class UiStateStore:
 
             migrated_rows = 0
             now = datetime.now().isoformat(timespec="seconds")
-            with get_connection() as connection:
-                create_schema(connection)
-                for source_path, default_stage in source_specs:
-                    payload = read_json_file(source_path, list, quarantine_corrupt=True)
-                    rows = payload if isinstance(payload, list) else []
-                    if not rows:
-                        continue
+            if not source_specs:
+                atomic_write_json(
+                    PART_TRACKER_MIGRATION_MARKER,
+                    {
+                        "migrated_at": now,
+                        "rows": 0,
+                    },
+                )
+                return
 
-                    params: list[tuple[Any, ...]] = []
-                    for index, raw_row in enumerate(rows):
-                        if not isinstance(raw_row, dict):
+            try:
+                with get_connection() as connection:
+                    create_schema(connection)
+                    for source_path, default_stage in source_specs:
+                        payload = read_json_file(source_path, list, quarantine_corrupt=True)
+                        rows = payload if isinstance(payload, list) else []
+                        if not rows:
                             continue
-                        stage = self._legacy_tracker_stage(raw_row, default_stage)
-                        requires_forming = 1 if bool(raw_row.get("f_flag") or raw_row.get("requires_forming")) else 0
-                        timestamp = str(
-                            raw_row.get("stage_updated_at")
-                            or raw_row.get("completed_at")
-                            or raw_row.get("updated_at")
-                            or raw_row.get("created_at")
-                            or now
-                        )
-                        tracker_key = f"legacy|{source_path.as_posix()}|{index}"
-                        params.append(
-                            (
+
+                        params: list[tuple[Any, ...]] = []
+                        for index, raw_row in enumerate(rows):
+                            if not isinstance(raw_row, dict):
+                                continue
+                            stage = self._legacy_tracker_stage(raw_row, default_stage)
+                            requires_forming = 1 if bool(raw_row.get("f_flag") or raw_row.get("requires_forming")) else 0
+                            timestamp = str(
+                                raw_row.get("stage_updated_at")
+                                or raw_row.get("completed_at")
+                                or raw_row.get("updated_at")
+                                or raw_row.get("created_at")
+                                or now
+                            )
+                            tracker_key = f"legacy|{source_path.as_posix()}|{index}"
+                            params.append(
+                                (
+                                    tracker_key,
+                                    None,
+                                    int(raw_row.get("run_number") or 1),
+                                    str(raw_row.get("nest_data") or raw_row.get("dat_name") or ""),
+                                    None,
+                                    int(raw_row.get("sequence") or index + 1),
+                                    str(raw_row.get("part_number") or ""),
+                                    str(raw_row.get("part_revision") or "-"),
+                                    str(raw_row.get("com_number") or ""),
+                                    str(raw_row.get("machine") or ""),
+                                    str(raw_row.get("user") or raw_row.get("user_code") or ""),
+                                    str(raw_row.get("location") or ""),
+                                    requires_forming,
+                                    stage,
+                                    timestamp,
+                                    timestamp,
+                                    timestamp,
+                                )
+                            )
+
+                        if not params:
+                            continue
+
+                        connection.executemany(
+                            """
+                            INSERT INTO part_tracker_items (
                                 tracker_key,
-                                None,
-                                int(raw_row.get("run_number") or 1),
-                                str(raw_row.get("nest_data") or raw_row.get("dat_name") or ""),
-                                None,
-                                int(raw_row.get("sequence") or index + 1),
-                                str(raw_row.get("part_number") or ""),
-                                str(raw_row.get("part_revision") or "-"),
-                                str(raw_row.get("com_number") or ""),
-                                str(raw_row.get("machine") or ""),
-                                str(raw_row.get("user") or raw_row.get("user_code") or ""),
-                                str(raw_row.get("location") or ""),
+                                flat_scan_session_id,
+                                run_number,
+                                dat_name,
+                                nest_part_id,
+                                scan_sequence,
+                                part_number,
+                                part_revision,
+                                com_number,
+                                machine,
+                                user_code,
+                                location,
                                 requires_forming,
                                 stage,
-                                timestamp,
-                                timestamp,
-                                timestamp,
-                            )
+                                stage_updated_at,
+                                created_at,
+                                updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(tracker_key) DO NOTHING
+                            """,
+                            params,
                         )
+                        migrated_rows += len(params)
 
-                    if not params:
-                        continue
-
-                    connection.executemany(
-                        """
-                        INSERT INTO part_tracker_items (
-                            tracker_key,
-                            flat_scan_session_id,
-                            run_number,
-                            dat_name,
-                            nest_part_id,
-                            scan_sequence,
-                            part_number,
-                            part_revision,
-                            com_number,
-                            machine,
-                            user_code,
-                            location,
-                            requires_forming,
-                            stage,
-                            stage_updated_at,
-                            created_at,
-                            updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(tracker_key) DO NOTHING
-                        """,
-                        params,
-                    )
-                    migrated_rows += len(params)
-
-                connection.commit()
+                    connection.commit()
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                return
 
             atomic_write_json(
                 PART_TRACKER_MIGRATION_MARKER,

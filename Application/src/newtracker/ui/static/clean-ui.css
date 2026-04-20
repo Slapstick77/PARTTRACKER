@@ -319,6 +319,59 @@ button.secondary.danger {
   box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.28);
 }
 
+.settings-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.settings-field span {
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--brand);
+}
+
+.settings-field input {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 0.96rem;
+  color: var(--text);
+  background: #ffffff;
+}
+
+.helper-text {
+  margin-top: 10px;
+  margin-bottom: 0;
+}
+
+.report-path {
+  margin-bottom: 0;
+  word-break: break-word;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.84rem;
+}
+
+.report-list {
+  margin: 10px 0 0;
+  padding-left: 0;
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+
+.report-row {
+  display: grid;
+  gap: 4px;
+}
+
+.report-meta {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .summary-card span {
   display: block;
   color: var(--muted);

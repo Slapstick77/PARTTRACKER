@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 import secrets
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-from flask import Flask, flash, redirect, render_template, request, session, url_for
+from flask import Flask, flash, got_request_exception, redirect, render_template, request, send_file, session, url_for
 from markupsafe import Markup, escape
+from werkzeug.exceptions import HTTPException
 
 from .admin_settings import (
     AdminSettingsError,
@@ -19,6 +21,7 @@ from .admin_settings import (
     ensure_import_monitor_started,
     start_import_job,
 )
+from .error_reports import list_error_reports, resolve_error_report_path, write_error_report
 from .ui_state import UiStateError, UiStateStore
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "ui" / "templates"
@@ -126,6 +129,63 @@ def create_ui_app() -> Flask:
 
     store = cast(Any, SessionUiStateProxy(resolve_ui_store))
 
+    def debug_reports_context(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        current = settings or admin_store.read()
+        report_directory = admin_store.error_report_directory(current)
+        return {
+            "enabled": admin_store.debug_enabled(current),
+            "folder": str(report_directory),
+            "folder_exists": report_directory.exists() and report_directory.is_dir(),
+            "recent_reports": list_error_reports(report_directory),
+        }
+
+    def save_debug_report(
+        *,
+        category: str,
+        summary: str,
+        traceback_text: str,
+        request_info: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> Path | None:
+        settings = admin_store.read()
+        if not admin_store.debug_enabled(settings):
+            return None
+        try:
+            return write_error_report(
+                directory=admin_store.error_report_directory(settings),
+                category=category,
+                summary=summary,
+                traceback_text=traceback_text,
+                request_info=request_info,
+                extra=extra,
+            )
+        except OSError:
+            return None
+
+    @got_request_exception.connect_via(app)
+    def capture_request_exception(_sender: Flask, exception: Exception, **_extra: Any) -> None:
+        if isinstance(exception, HTTPException):
+            return
+
+        trace_text = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+        request_payload = {
+            "method": request.method,
+            "path": request.path,
+            "endpoint": request.endpoint,
+            "query": {key: request.args.getlist(key) for key in request.args},
+            "form": {key: request.form.getlist(key) for key in request.form},
+            "json": request.get_json(silent=True) if request.is_json else None,
+            "remote_addr": request.remote_addr,
+            "user_agent": request.user_agent.string,
+            "is_admin": bool(session.get("is_admin")),
+        }
+        save_debug_report(
+            category="request-error",
+            summary=f"{request.method} {request.path} failed: {exception}",
+            traceback_text=trace_text,
+            request_info=request_payload,
+        )
+
     @app.before_request
     def start_background_monitor() -> None:
         ensure_import_monitor_started()
@@ -165,6 +225,7 @@ def create_ui_app() -> Flask:
         return {
             "settings": settings,
             "sources": admin_store.describe_sources(settings),
+            "debug_reports": debug_reports_context(settings),
             "last_import": admin_store.latest_import_result(settings),
             "import_monitor": admin_store.import_monitor(),
             "admin_username": admin_store.admin_username(settings),
@@ -596,5 +657,18 @@ def create_ui_app() -> Flask:
         clear_parsed_data()
         flash("Parsed DAT and nest data cleared. Scan state and archives were reset.", "success")
         return redirect(url_for("admin_home"))
+
+    @app.get("/admin/error-reports/<path:report_name>")
+    def admin_download_error_report(report_name: str):
+        guard = require_admin()
+        if guard is not None:
+            return guard
+        settings = admin_store.read()
+        try:
+            report_path = resolve_error_report_path(admin_store.error_report_directory(settings), report_name)
+        except FileNotFoundError:
+            flash("Error report file not found.", "error")
+            return redirect(url_for("admin_home"))
+        return send_file(report_path, as_attachment=True, download_name=report_path.name)
 
     return app

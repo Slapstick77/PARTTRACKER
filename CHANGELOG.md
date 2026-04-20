@@ -14,12 +14,19 @@ This file tracks notable changes made to the NEWTRACKER application during activ
 - Added a persisted `scanner_auto_mode` admin setting with `Off`, `Auto Complete`, and `Full Auto` modes for the main scanner.
 - Added an admin three-way selector for main-scanner automation so operators can decide whether DAT loads stay manual, auto-move expected parts into Scanned, or auto-complete the batch to `Cut`.
 - Added main-scanner auto-fill behavior that can move every expected part into the scanned list immediately after a DAT load or repeat-run confirmation.
+- Added admin-controlled debug diagnostics with an on/off capture toggle, a configurable error-report folder, automatic traceback report files, and admin download links for recent reports.
+
+### Fixed
+
+- Fixed admin import-status polling so it no longer hits the database schema path during active imports, preventing transient `database is locked` failures while the import is still running.
+- Fixed first-run scanner initialization so empty legacy tracker migration no longer touches SQLite unnecessarily, and busy tracker migration attempts now defer instead of crashing request startup.
 
 ### Validation
 
 - Verified the edited Python, template, and CSS files reported no workspace errors.
 - Verified the Flask app restarted and responded on `http://127.0.0.1:5000` after the changes.
 - Ran an isolated temporary-file validation covering `AdminSettingsStore.update_from_form()` persistence and `UiStateStore.auto_fill_current_batch()` behavior without mutating live tracker data.
+- Verified the admin page renders the new debug-report controls and report list sections.
 
 ## 2026-04-17
 
