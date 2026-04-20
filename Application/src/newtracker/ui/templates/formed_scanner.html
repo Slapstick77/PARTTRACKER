@@ -40,14 +40,9 @@
 
         <div class="controls-layout formed-controls-layout">
           <div class="control-column">
-            <form method="post" action="{{ url_for('formed_scan_dat') }}" class="scan-box compact {% if active_field == 'dat_token' %}active{% endif %}">
-              <label>DAT TOKEN</label>
-              <input name="value" placeholder="Scan DAT (example: SCDDAGFY.DAT)" {% if active_field == 'dat_token' %}autofocus{% endif %}>
-            </form>
-
-            <form method="post" action="{{ url_for('formed_scan_part') }}" class="scan-box part-scan-box {% if active_field == 'part_scan' %}active{% endif %}">
-              <label>FORMED PART SCAN</label>
-              <input name="value" placeholder="Scan formed part barcode" {% if active_field == 'part_scan' %}autofocus{% endif %}>
+            <form method="post" action="{{ url_for('formed_scan') }}" class="scan-box compact active">
+              <label>FORMED SCAN</label>
+              <input name="value" placeholder="Scan DAT token or formed part barcode" autofocus>
             </form>
           </div>
 
@@ -209,7 +204,7 @@
           </div>
         {% else %}
           <article class="list-pane list-full-pane">
-            <p class="empty-state">No active formed lists loaded yet. Scan DAT tokens to load one or more lists.</p>
+            <p class="empty-state">No active formed lists loaded yet. Scan a DAT or formed part to load the correct list.</p>
           </article>
         {% endif %}
       </section>

@@ -2,6 +2,25 @@
 
 This file tracks notable changes made to the NEWTRACKER application during active development.
 
+## 2026-04-20
+
+### Changed
+
+- The formed scanner now uses a single scan input that accepts either a DAT token or a formed part barcode instead of separate scan boxes.
+- Formed scanner routing now detects known DAT scans server-side and otherwise treats the value as a part scan, so DAT loads, unique part matches, and ambiguous part selection all stay in one flow.
+
+### Added
+
+- Added a persisted `scanner_auto_mode` admin setting with `Off`, `Auto Complete`, and `Full Auto` modes for the main scanner.
+- Added an admin three-way selector for main-scanner automation so operators can decide whether DAT loads stay manual, auto-move expected parts into Scanned, or auto-complete the batch to `Cut`.
+- Added main-scanner auto-fill behavior that can move every expected part into the scanned list immediately after a DAT load or repeat-run confirmation.
+
+### Validation
+
+- Verified the edited Python, template, and CSS files reported no workspace errors.
+- Verified the Flask app restarted and responded on `http://127.0.0.1:5000` after the changes.
+- Ran an isolated temporary-file validation covering `AdminSettingsStore.update_from_form()` persistence and `UiStateStore.auto_fill_current_batch()` behavior without mutating live tracker data.
+
 ## 2026-04-17
 
 ### Changed

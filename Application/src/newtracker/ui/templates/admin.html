@@ -97,6 +97,40 @@
               <p class="muted helper-text">Use 0 to disable scheduled automatic imports.</p>
             </section>
 
+            <section class="folder-card">
+              <div class="folder-card-header">
+                <div>
+                  <h3>Main scanner automation</h3>
+                  <p class="muted">Choose what happens right after a DAT loads expected parts on the Main Scanner page.</p>
+                </div>
+              </div>
+
+              <div class="toggle-row three-way-toggle">
+                <label class="toggle-option">
+                  <input type="radio" name="scanner_auto_mode" value="off" {% if settings.scanner_auto_mode == 'off' %}checked{% endif %}>
+                  <span>
+                    <strong>Off</strong>
+                    <small>Default behavior. Load the DAT and scan parts manually.</small>
+                  </span>
+                </label>
+                <label class="toggle-option">
+                  <input type="radio" name="scanner_auto_mode" value="auto_complete" {% if settings.scanner_auto_mode == 'auto_complete' %}checked{% endif %}>
+                  <span>
+                    <strong>Auto Complete</strong>
+                    <small>Move every expected part into Scanned, but do not click Complete.</small>
+                  </span>
+                </label>
+                <label class="toggle-option">
+                  <input type="radio" name="scanner_auto_mode" value="full_auto" {% if settings.scanner_auto_mode == 'full_auto' %}checked{% endif %}>
+                  <span>
+                    <strong>Full Auto</strong>
+                    <small>Move every expected part into Scanned and submit Complete automatically.</small>
+                  </span>
+                </label>
+              </div>
+              <p class="muted helper-text">Off keeps the current flow. Auto Complete moves parts only. Full Auto also finishes the batch.</p>
+            </section>
+
             <button type="submit">Save Settings</button>
           </form>
         </article>

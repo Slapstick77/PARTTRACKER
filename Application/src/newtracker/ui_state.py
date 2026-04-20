@@ -113,7 +113,7 @@ class UiStateStore:
             "formed_queue": [],
             "formed_active_lists": [],
             "formed_active_field": "dat_token",
-            "formed_message": "Scan DAT token to load formed list",
+            "formed_message": "Scan DAT or formed part to load formed list",
             "formed_message_level": "info",
             "formed_selection_part": "",
             "formed_selection_candidates": [],
@@ -728,7 +728,7 @@ class UiStateStore:
         reset_state["formed_queue"] = state.get("formed_queue", [])
         reset_state["formed_active_lists"] = state.get("formed_active_lists", [])
         reset_state["formed_active_field"] = state.get("formed_active_field", "dat_token")
-        reset_state["formed_message"] = state.get("formed_message", "Scan DAT token to load formed list")
+        reset_state["formed_message"] = state.get("formed_message", "Scan DAT or formed part to load formed list")
         reset_state["formed_message_level"] = state.get("formed_message_level", "info")
         reset_state["formed_selection_part"] = state.get("formed_selection_part", "")
         reset_state["formed_selection_candidates"] = list(state.get("formed_selection_candidates", []))
@@ -1143,12 +1143,36 @@ class UiStateStore:
             state["message_level"] = "success"
 
     def _increment_flat_scan_item(self, flat_scan_session_id: int | None, part: dict[str, Any]) -> None:
-        if flat_scan_session_id is None:
+        self._increment_flat_scan_items(flat_scan_session_id, [part])
+
+    def _increment_flat_scan_items(self, flat_scan_session_id: int | None, parts: list[dict[str, Any]]) -> None:
+        if flat_scan_session_id is None or not parts:
             return
+
+        update_params = [
+            (int(flat_scan_session_id), int(part["nest_part_id"]))
+            for part in parts
+            if part.get("nest_part_id") is not None
+        ]
+        if not update_params:
+            return
+
+        event_params = [
+            (
+                "flat_scan",
+                str(part.get("part_number") or ""),
+                str(part.get("part_number") or ""),
+                str(part.get("part_revision") or ""),
+                int(flat_scan_session_id),
+                str(part.get("com_number") or ""),
+            )
+            for part in parts
+        ]
+        com_numbers = [str(part.get("com_number") or "") for part in parts]
 
         with get_connection() as connection:
             create_schema(connection)
-            connection.execute(
+            connection.executemany(
                 """
                 UPDATE flat_scan_items
                 SET scanned_quantity = CASE
@@ -1162,9 +1186,9 @@ class UiStateStore:
                     updated_at = CURRENT_TIMESTAMP
                 WHERE flat_scan_session_id = ? AND nest_part_id = ?
                 """,
-                (int(flat_scan_session_id), int(part["nest_part_id"])),
+                update_params,
             )
-            connection.execute(
+            connection.executemany(
                 """
                 INSERT INTO scan_events (
                     event_type,
@@ -1175,16 +1199,9 @@ class UiStateStore:
                     notes
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    "flat_scan",
-                    str(part.get("part_number") or ""),
-                    str(part.get("part_number") or ""),
-                    str(part.get("part_revision") or ""),
-                    int(flat_scan_session_id),
-                    str(part.get("com_number") or ""),
-                ),
+                event_params,
             )
-            self._touch_monitor_units(connection, [str(part.get("com_number") or "")])
+            self._touch_monitor_units(connection, com_numbers)
             connection.commit()
 
     def _ensure_forming_batch(self, connection, dat_name: str, rows: list[Any], *, mark_started: bool) -> tuple[int, str, str, str, int]:
@@ -1853,6 +1870,50 @@ class UiStateStore:
 
         return token.upper()
 
+    @staticmethod
+    def _scan_looks_like_explicit_dat(raw: str) -> bool:
+        token = str(raw or "").strip()
+        if not token:
+            return False
+        return bool(re.search(r"\.dat\b", token, flags=re.IGNORECASE))
+
+    def _has_formed_part_target(self, state: dict[str, Any], part_number: str) -> bool:
+        cleaned = str(part_number or "").strip()
+        if not cleaned:
+            return False
+        if any(
+            str(part.get("part_number") or "") == cleaned
+            for dat_list in state.get("formed_active_lists", [])
+            for part in dat_list.get("expected_parts", [])
+        ):
+            return True
+        return bool(self._load_queued_formed_part_candidates(state, cleaned))
+
+    def _is_known_formed_dat_token(self, state: dict[str, Any], raw_value: str) -> bool:
+        token = self._normalize_dat_token(raw_value)
+        if not token:
+            return False
+        if any(
+            str(item.get("dat_name") or "").strip().upper() == token
+            for item in state.get("formed_active_lists", [])
+        ):
+            return True
+        if any(
+            str(item.get("dat_name") or "").strip().upper() == token
+            for item in state.get("formed_selection_candidates", [])
+        ):
+            return True
+        return self._load_formed_queue_preview(token) is not None
+
+    def _should_route_formed_scan_as_dat(self, state: dict[str, Any], raw_value: str) -> bool:
+        if self._scan_looks_like_explicit_dat(raw_value):
+            return True
+        if state.get("formed_selection_candidates") and self._is_known_formed_dat_token(state, raw_value):
+            return True
+        if self._has_formed_part_target(state, raw_value):
+            return False
+        return self._is_known_formed_dat_token(state, raw_value)
+
     def _scan_part_into_state(self, state: dict[str, Any], part_number: str) -> None:
         target_index = next(
             (index for index, part in enumerate(state["expected_parts"]) if part["part_number"] == part_number),
@@ -1863,10 +1924,7 @@ class UiStateStore:
             raise UiStateError(f"Part {part_number} is not expected or is already complete.")
 
         state["expected_parts"].pop(target_index)
-        target["machine"] = str(state.get("machine_code") or "")
-        target["user_code"] = str(state.get("user_code") or "")
-        target["location"] = str(target.get("location") or state.get("location_code") or "")
-        state["scanned_parts"].append(target)
+        self._mark_part_scanned(state, target)
         self._increment_flat_scan_item(state.get("flat_scan_session_id"), target)
 
         remaining = len(state["expected_parts"])
@@ -1878,6 +1936,36 @@ class UiStateStore:
             state["message"] = f"Accepted {part_number}. {remaining} part scans remaining."
             state["active_field"] = "part_scan"
             state["message_level"] = "success"
+
+    def _mark_part_scanned(self, state: dict[str, Any], part: dict[str, Any]) -> None:
+        part["machine"] = str(state.get("machine_code") or "")
+        part["user_code"] = str(state.get("user_code") or "")
+        part["location"] = str(part.get("location") or state.get("location_code") or "")
+        state["scanned_parts"].append(part)
+
+    def auto_fill_current_batch(self) -> tuple[str, int]:
+        state = self.read()
+        dat_name = str(state.get("nest_data") or "").strip().upper()
+        if not dat_name:
+            raise UiStateError("Scan NEST DATA before using scanner auto mode.")
+
+        pending_parts = [dict(part) for part in state.get("expected_parts", [])]
+        if not pending_parts:
+            return dat_name, 0
+
+        state["expected_parts"] = []
+        for part in pending_parts:
+            self._mark_part_scanned(state, part)
+
+        self._increment_flat_scan_items(state.get("flat_scan_session_id"), pending_parts)
+        state["scan_edit_mode"] = False
+        state["active_field"] = "machine_code"
+        state["message"] = (
+            f"Auto complete moved {len(pending_parts)} parts to Scanned. Click Complete when ready or scan the next DAT."
+        )
+        state["message_level"] = "success"
+        self.write(state)
+        return dat_name, len(pending_parts)
 
     def invalidate_scan(self, message: str) -> dict[str, Any]:
         state = self.read()
@@ -1979,6 +2067,19 @@ class UiStateStore:
                 else None
             ),
         }
+
+    def formed_scan_value(self, raw_value: str) -> dict[str, Any]:
+        state = self.read()
+        cleaned = str(raw_value or "").strip()
+        if not cleaned:
+            raise UiStateError("Scanned value was blank.")
+
+        if self._should_route_formed_scan_as_dat(state, cleaned):
+            self._select_formed_list(state, cleaned)
+            self.write(state)
+            return state
+
+        return self.formed_scan_part(cleaned)
 
     def formed_scan_dat(self, dat_token: str) -> dict[str, Any]:
         state = self.read()

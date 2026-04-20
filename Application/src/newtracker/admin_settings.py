@@ -49,6 +49,15 @@ DEFAULT_SOURCE_FOLDERS = {
     },
 }
 
+MAIN_SCANNER_AUTO_MODE_OFF = "off"
+MAIN_SCANNER_AUTO_MODE_AUTO_COMPLETE = "auto_complete"
+MAIN_SCANNER_AUTO_MODE_FULL_AUTO = "full_auto"
+VALID_MAIN_SCANNER_AUTO_MODES = {
+    MAIN_SCANNER_AUTO_MODE_OFF,
+    MAIN_SCANNER_AUTO_MODE_AUTO_COMPLETE,
+    MAIN_SCANNER_AUTO_MODE_FULL_AUTO,
+}
+
 _SETTINGS_LOCK = threading.RLock()
 _IMPORT_LOCK = threading.Lock()
 _MONITOR_LOCK = threading.Lock()
@@ -146,6 +155,7 @@ class AdminSettingsStore:
     def _default_state(self) -> dict[str, Any]:
         return {
             "poll_interval_minutes": 0,
+            "scanner_auto_mode": MAIN_SCANNER_AUTO_MODE_OFF,
             "folders": {key: dict(value) for key, value in DEFAULT_SOURCE_FOLDERS.items()},
             "last_import": self._default_run_result("No import has been run yet."),
             "security": self._default_security_state(),
@@ -171,11 +181,19 @@ class AdminSettingsStore:
         with _SETTINGS_LOCK:
             persisted = {
                 "poll_interval_minutes": state.get("poll_interval_minutes", 0),
+                "scanner_auto_mode": self.scanner_auto_mode(state),
                 "folders": state.get("folders", {}),
                 "last_import": state.get("last_import", self._default_state()["last_import"]),
                 "security": state.get("security", self._default_state()["security"]),
             }
             atomic_write_json(self.path, persisted)
+
+    def scanner_auto_mode(self, state: dict[str, Any] | None = None) -> str:
+        current = state or self.read()
+        raw = str(current.get("scanner_auto_mode") or MAIN_SCANNER_AUTO_MODE_OFF).strip().lower()
+        if raw not in VALID_MAIN_SCANNER_AUTO_MODES:
+            return MAIN_SCANNER_AUTO_MODE_OFF
+        return raw
 
     def admin_username(self, state: dict[str, Any] | None = None) -> str:
         current = state or self.read()
@@ -283,6 +301,11 @@ class AdminSettingsStore:
             raise AdminSettingsError("Auto-check interval cannot be negative.")
 
         state["poll_interval_minutes"] = poll_interval
+
+        scanner_auto_mode = str(form.get("scanner_auto_mode", MAIN_SCANNER_AUTO_MODE_OFF)).strip().lower()
+        if scanner_auto_mode not in VALID_MAIN_SCANNER_AUTO_MODES:
+            raise AdminSettingsError("Main scanner auto mode was invalid.")
+        state["scanner_auto_mode"] = scanner_auto_mode
 
         for folder_key in state["folders"]:
             mode = str(form.get(f"source_mode_{folder_key}", "test")).strip().lower()

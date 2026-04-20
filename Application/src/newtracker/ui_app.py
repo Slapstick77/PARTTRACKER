@@ -12,6 +12,9 @@ from markupsafe import Markup, escape
 from .admin_settings import (
     AdminSettingsError,
     AdminSettingsStore,
+    MAIN_SCANNER_AUTO_MODE_AUTO_COMPLETE,
+    MAIN_SCANNER_AUTO_MODE_FULL_AUTO,
+    MAIN_SCANNER_AUTO_MODE_OFF,
     clear_parsed_data,
     ensure_import_monitor_started,
     start_import_job,
@@ -168,6 +171,32 @@ def create_ui_app() -> Flask:
             "security": settings.get("security", {}),
         }
 
+    def maybe_apply_main_scanner_auto_mode(state: dict[str, Any]) -> tuple[str, str] | None:
+        mode = admin_store.scanner_auto_mode()
+        if mode == MAIN_SCANNER_AUTO_MODE_OFF:
+            return None
+        if state.get("repeat_scan_pending") or not state.get("nest_data"):
+            return None
+
+        dat_name = str(state.get("nest_data") or "").strip().upper()
+        if mode == MAIN_SCANNER_AUTO_MODE_AUTO_COMPLETE:
+            _, moved_count = store.auto_fill_current_batch()
+            if moved_count <= 0:
+                return None
+            return (
+                f"Auto Complete moved {moved_count} parts into Scanned for {dat_name}. Click Complete when ready.",
+                "success",
+            )
+
+        _, moved_count = store.auto_fill_current_batch()
+        updated_count = store.complete_current_batch()
+        if moved_count > 0:
+            return (
+                f"Full Auto moved {moved_count} parts and completed {dat_name}. Updated {updated_count} parts to Cut.",
+                "success",
+            )
+        return (f"Full Auto completed {dat_name}. Updated {updated_count} parts to Cut.", "success")
+
     def require_admin():
         if session.get("is_admin"):
             return None
@@ -204,7 +233,12 @@ def create_ui_app() -> Flask:
             store.invalidate_scan(str(exc))
             flash(str(exc), "error")
         else:
-            if not (field_name == "nest_data" and state.get("repeat_scan_pending")):
+            auto_notice = None
+            if field_name == "nest_data" and not state.get("repeat_scan_pending"):
+                auto_notice = maybe_apply_main_scanner_auto_mode(state)
+            if auto_notice is not None:
+                flash(auto_notice[0], auto_notice[1])
+            elif not (field_name == "nest_data" and state.get("repeat_scan_pending")):
                 flash("Scan accepted.", "success")
         return redirect(url_for("home"))
 
@@ -216,10 +250,14 @@ def create_ui_app() -> Flask:
             store.invalidate_scan(str(exc))
             flash(str(exc), "error")
         else:
-            flash(
-                f"Started repeat run {int(state.get('current_run_number') or 0)} for {state.get('nest_data') or ''}.",
-                "success",
-            )
+            auto_notice = maybe_apply_main_scanner_auto_mode(state)
+            if auto_notice is not None:
+                flash(auto_notice[0], auto_notice[1])
+            else:
+                flash(
+                    f"Started repeat run {int(state.get('current_run_number') or 0)} for {state.get('nest_data') or ''}.",
+                    "success",
+                )
         return redirect(url_for("home"))
 
     @app.post("/repeat-scan/cancel")
@@ -240,6 +278,15 @@ def create_ui_app() -> Flask:
     @app.get("/monitor")
     def monitor_dashboard():
         return render_template("monitor_dashboard.html", **build_monitor_context())
+
+    @app.post("/formed/scan")
+    def formed_scan():
+        try:
+            store.formed_scan_value(request.form.get("value", ""))
+        except UiStateError as exc:
+            store.invalidate_formed_scan(str(exc))
+            flash(str(exc), "error")
+        return redirect(url_for("formed_home"))
 
     @app.post("/formed/scan-dat")
     def formed_scan_dat():
