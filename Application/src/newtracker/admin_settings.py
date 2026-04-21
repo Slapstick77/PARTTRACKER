@@ -213,6 +213,35 @@ class AdminSettingsStore:
         current = state or self.read()
         return resolve_error_report_directory(self.error_report_folder(current))
 
+    def save_error_report(
+        self,
+        *,
+        category: str,
+        summary: str,
+        traceback_text: str = "",
+        request_info: Mapping[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
+        force: bool = False,
+        raise_on_error: bool = False,
+        state: dict[str, Any] | None = None,
+    ) -> Path | None:
+        current = state or self.read()
+        if not force and not self.debug_enabled(current):
+            return None
+        try:
+            return write_error_report(
+                directory=self.error_report_directory(current),
+                category=category,
+                summary=summary,
+                traceback_text=traceback_text,
+                request_info=request_info,
+                extra=extra,
+            )
+        except OSError:
+            if raise_on_error:
+                raise
+            return None
+
     def admin_username(self, state: dict[str, Any] | None = None) -> str:
         current = state or self.read()
         return str(current.get("security", {}).get("admin_username") or LEGACY_ADMIN_USERNAME)
@@ -630,6 +659,34 @@ def _progress_updater(store: AdminSettingsStore, trigger: str, active_path_strin
     return _update
 
 
+def _warning_reporter(
+    store: AdminSettingsStore,
+    *,
+    trigger: str,
+    started_at: str,
+    active_paths: list[str],
+    missing_paths: list[str],
+):
+    def _report(payload: Mapping[str, Any]) -> None:
+        summary = str(payload.get("summary") or "Import warning")
+        store.save_error_report(
+            category=str(payload.get("category") or "import-warning"),
+            summary=summary,
+            traceback_text=str(payload.get("traceback_text") or ""),
+            extra={
+                "trigger": trigger,
+                "started_at": started_at,
+                "active_paths": active_paths,
+                "missing_paths": missing_paths,
+                **dict(payload.get("extra") or {}),
+            },
+            force=True,
+            state=store.read(),
+        )
+
+    return _report
+
+
 def _normal_import_changed_since() -> datetime | None:
     with get_connection() as connection:
         row = connection.execute(
@@ -731,26 +788,30 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str) -> dict[str, An
                 active_paths,
                 changed_since=_normal_import_changed_since(),
                 progress_callback=_progress_updater(store, trigger, active_path_strings, missing_paths),
+                warning_callback=_warning_reporter(
+                    store,
+                    trigger=trigger,
+                    started_at=started_at,
+                    active_paths=active_path_strings,
+                    missing_paths=missing_paths,
+                ),
             )
         except Exception as exc:
             trace_text = traceback.format_exc()
             atomic_write_text(IMPORT_ERROR_LOG_PATH, trace_text, encoding="utf-8")
-            if store.debug_enabled(state):
-                try:
-                    write_error_report(
-                        directory=store.error_report_directory(state),
-                        category="import-error",
-                        summary=f"Import failed: {exc}",
-                        traceback_text=trace_text,
-                        extra={
-                            "trigger": trigger,
-                            "started_at": started_at,
-                            "active_paths": active_path_strings,
-                            "missing_paths": missing_paths,
-                        },
-                    )
-                except OSError:
-                    pass
+            store.save_error_report(
+                category="import-error",
+                summary=f"Import failed: {exc}",
+                traceback_text=trace_text,
+                extra={
+                    "trigger": trigger,
+                    "started_at": started_at,
+                    "active_paths": active_path_strings,
+                    "missing_paths": missing_paths,
+                },
+                force=True,
+                state=state,
+            )
             store.finish_import_run(
                 run_id,
                 status="error",

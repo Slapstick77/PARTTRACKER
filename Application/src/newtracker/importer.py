@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import traceback
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -43,6 +44,7 @@ IMMUTABLE_SOURCE_ROOTS = {Path(r"P:\Manufacturing\CNC")}
 IMMUTABLE_SOURCE_ROOT_KEYS = {str(path).casefold() for path in IMMUTABLE_SOURCE_ROOTS}
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+WarningCallback = Callable[[dict[str, Any]], None]
 
 
 class SourceAccessError(RuntimeError):
@@ -101,12 +103,30 @@ def load_scan_cache() -> dict[str, Any]:
     }
 
 
-def save_scan_cache(cache: dict[str, Any]) -> None:
+def save_scan_cache(cache: dict[str, Any], *, warning_callback: WarningCallback | None = None) -> None:
     payload = {
         "roots": dict(cache.get("roots", {})) if isinstance(cache.get("roots"), Mapping) else {},
         "deferred_supported_files": [str(value) for value in cache.get("deferred_supported_files", [])],
     }
-    atomic_write_json(SCAN_CACHE_PATH, payload)
+    try:
+        atomic_write_json(SCAN_CACHE_PATH, payload)
+    except OSError as exc:
+        # This cache is only an import optimization. If Windows or another process
+        # briefly locks the sidecar file, keep the import running and rebuild the
+        # cache on a later pass instead of failing the whole job.
+        if warning_callback is not None:
+            warning_callback(
+                {
+                    "category": "import-cache-write-warning",
+                    "summary": f"Import scan cache write skipped: {exc}",
+                    "traceback_text": traceback.format_exc(),
+                    "extra": {
+                        "cache_path": str(SCAN_CACHE_PATH),
+                        "error_type": type(exc).__name__,
+                    },
+                }
+            )
+        return
 
 
 def clear_scan_cache() -> None:
@@ -1594,6 +1614,7 @@ def _scan_supported_files(
     changed_since: datetime | None,
     processed_paths: set[str],
     progress_callback: ProgressCallback | None,
+    warning_callback: WarningCallback | None,
 ) -> tuple[list[tuple[Path, str]], int, int]:
     cache = load_scan_cache()
     cached_roots = {
@@ -1639,7 +1660,10 @@ def _scan_supported_files(
         filtered_old_files += root_filtered_old
         unstable_recent_files += root_unstable
 
-        save_scan_cache({"roots": updated_roots, "deferred_supported_files": sorted(next_deferred)})
+        save_scan_cache(
+            {"roots": updated_roots, "deferred_supported_files": sorted(next_deferred)},
+            warning_callback=warning_callback,
+        )
 
         for path in root_files:
             normalized_path = str(path).casefold()
@@ -1688,7 +1712,10 @@ def _scan_supported_files(
         seen.add(normalized_path)
         discovered.append((path, file_type))
 
-    save_scan_cache({"roots": updated_roots, "deferred_supported_files": sorted(next_deferred)})
+    save_scan_cache(
+        {"roots": updated_roots, "deferred_supported_files": sorted(next_deferred)},
+        warning_callback=warning_callback,
+    )
     return sorted(discovered, key=lambda item: str(item[0]).casefold()), unstable_recent_files, filtered_old_files
 
 
@@ -1697,6 +1724,7 @@ def import_paths(
     *,
     changed_since: datetime | None = None,
     progress_callback: ProgressCallback | None = None,
+    warning_callback: WarningCallback | None = None,
 ) -> dict[str, int]:
     with get_connection() as connection:
         create_schema(connection)
@@ -1706,6 +1734,7 @@ def import_paths(
             changed_since=changed_since,
             processed_paths=processed_paths,
             progress_callback=progress_callback,
+            warning_callback=warning_callback,
         )
         imported_nest_ids: list[int] = []
 

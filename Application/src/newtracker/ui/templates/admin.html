@@ -200,6 +200,10 @@
                 <div><span>Recent files</span><strong>{{ debug_reports.recent_reports | length }}</strong></div>
               </div>
               <p class="muted report-path">{{ debug_reports.folder }}</p>
+              <form method="post" action="{{ url_for('admin_send_test_error_report') }}" class="inline-action-form">
+                <button type="submit" class="secondary">Send Test Log</button>
+              </form>
+              <p class="muted helper-text">Manual test logs always try the configured folder so you can verify network-path access. Import warnings and failures also write reports there.</p>
               {% if not debug_reports.folder_exists %}
               <p class="muted">The folder will be created automatically when the first report is saved.</p>
               {% endif %}
@@ -262,7 +266,7 @@
               </div>
             </section>
 
-            <form method="post" action="{{ url_for('admin_clear_parsed_data') }}" class="admin-action-card">
+            <form method="post" action="{{ url_for('admin_clear_parsed_data') }}" class="admin-action-card" onsubmit="return confirm('This will wipe all data from the database. Are you sure you want to continue?');">
               <h3>Clear Parsed Data</h3>
               <p class="muted">Remove parsed .DAT data, nest data, processed-file tracking, missed rows, and saved scan state so you can start fresh.</p>
               <button type="submit" class="secondary danger">Clear All Parsed Data</button>

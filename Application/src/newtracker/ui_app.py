@@ -21,7 +21,7 @@ from .admin_settings import (
     ensure_import_monitor_started,
     start_import_job,
 )
-from .error_reports import list_error_reports, resolve_error_report_path, write_error_report
+from .error_reports import list_error_reports, resolve_error_report_path
 from .ui_state import UiStateError, UiStateStore
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "ui" / "templates"
@@ -147,20 +147,14 @@ def create_ui_app() -> Flask:
         request_info: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> Path | None:
-        settings = admin_store.read()
-        if not admin_store.debug_enabled(settings):
-            return None
-        try:
-            return write_error_report(
-                directory=admin_store.error_report_directory(settings),
-                category=category,
-                summary=summary,
-                traceback_text=traceback_text,
-                request_info=request_info,
-                extra=extra,
-            )
-        except OSError:
-            return None
+        return admin_store.save_error_report(
+            category=category,
+            summary=summary,
+            traceback_text=traceback_text,
+            request_info=request_info,
+            extra=extra,
+            force=False,
+        )
 
     @got_request_exception.connect_via(app)
     def capture_request_exception(_sender: Flask, exception: Exception, **_extra: Any) -> None:
@@ -656,6 +650,30 @@ def create_ui_app() -> Flask:
             return guard
         clear_parsed_data()
         flash("Parsed DAT and nest data cleared. Scan state and archives were reset.", "success")
+        return redirect(url_for("admin_home"))
+
+    @app.post("/admin/error-reports/test")
+    def admin_send_test_error_report():
+        guard = require_admin()
+        if guard is not None:
+            return guard
+        try:
+            report_path = admin_store.save_error_report(
+                category="test-log",
+                summary="Manual test log from Admin Settings.",
+                traceback_text="This is a manual NEWTRACKER test log created to verify the configured report folder is writable.",
+                extra={
+                    "created_from": "admin",
+                    "request_path": request.path,
+                },
+                force=True,
+                raise_on_error=True,
+            )
+        except OSError as exc:
+            flash(f"Test log write failed: {exc}", "error")
+        else:
+            report_name = report_path.name if report_path is not None else "test log"
+            flash(f"Test log saved: {report_name}", "success")
         return redirect(url_for("admin_home"))
 
     @app.get("/admin/error-reports/<path:report_name>")

@@ -2,6 +2,27 @@
 
 This file tracks notable changes made to the NEWTRACKER application during active development.
 
+## 2026-04-21
+
+### Fixed
+
+- Fixed auto-import failures on Windows where transient `Access is denied` errors during `import_scan_cache.json` replacement could abort the whole import while scanning folders.
+- Atomic sidecar-file writes now retry transient replace failures briefly, which helps when antivirus, indexing, or another process momentarily holds the target file open.
+- Import scan-cache writes are now best-effort only, so a locked cache sidecar no longer prevents DAT and job-file imports from continuing.
+- Import scan-cache write warnings and import failures now write diagnostic report files to the configured admin report folder even when the warning is non-fatal.
+- The admin `Clear All Parsed Data` action now asks for confirmation before wiping parsed database content.
+
+### Added
+
+- Added an admin `Send Test Log` action so the configured report folder can be verified on local or network paths without waiting for a real failure.
+
+### Validation
+
+- Verified the updated Python package compiles locally.
+- Verified the atomic write helper retries a transient replace failure and still completes the write.
+- Verified `save_scan_cache()` no longer raises when the cache write path throws `PermissionError`.
+- Verified a manual test log can be created through the configured report-writer path.
+
 ## 2026-04-20
 
 ### Changed
