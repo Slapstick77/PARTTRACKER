@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-from flask import Flask, flash, got_request_exception, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, flash, g, got_request_exception, redirect, render_template, request, send_file, session, url_for
 from markupsafe import Markup, escape
 from werkzeug.exceptions import HTTPException
 
@@ -122,6 +122,9 @@ def create_ui_app() -> Flask:
             session_key = secrets.token_urlsafe(16)
             session["ui_session_key"] = session_key
             session.modified = True
+            g.created_ui_session_key = True
+        elif not hasattr(g, "created_ui_session_key"):
+            g.created_ui_session_key = False
         return session_key
 
     def resolve_ui_store() -> Any:
@@ -185,15 +188,42 @@ def create_ui_app() -> Flask:
         ensure_import_monitor_started()
         current_ui_session_key()
 
+    def maybe_auto_resume_main_session() -> dict[str, Any] | None:
+        if not bool(getattr(g, "created_ui_session_key", False)):
+            return None
+
+        current_session = current_ui_session_key()
+        current_state = UiStateStore(session_key=current_session).read()
+        has_visible_session_state = bool(current_state.get("nest_data")) or bool(current_state.get("expected_parts")) or bool(current_state.get("scanned_parts")) or bool(current_state.get("repeat_scan_pending"))
+        if has_visible_session_state:
+            return None
+
+        candidates = UiStateStore.list_resumable_sessions(
+            current_session_key=current_session,
+            limit=1,
+            require_scanned_progress=True,
+        )
+        if not candidates:
+            return None
+
+        session["ui_session_key"] = candidates[0]["session_key"]
+        session.modified = True
+        return candidates[0]
+
     def build_context() -> dict:
+        maybe_auto_resume_main_session()
+        session_key = current_ui_session_key()
         state = store.read()
         summary = store.summary(state)
         has_active_batch = bool(state.get("nest_data")) and summary["expected_total"] > 0
+        has_visible_session_state = bool(state.get("nest_data")) or bool(state.get("expected_parts")) or bool(state.get("scanned_parts"))
+        resume_candidates = [] if has_visible_session_state else UiStateStore.list_resumable_sessions(current_session_key=session_key, require_scanned_progress=True)
         return {
             "state": state,
             "summary": summary,
             "expected_parts": store.expected_remaining_list(state),
             "scanned_parts": store.scanned_counts(state),
+            "resume_candidates": resume_candidates,
             "has_active_batch": has_active_batch,
             "current_run_number": int(state.get("current_run_number") or 0),
             "repeat_scan_pending": bool(state.get("repeat_scan_pending")),
@@ -279,6 +309,26 @@ def create_ui_app() -> Flask:
     @app.get("/")
     def home():
         return render_template("index.html", **build_context())
+
+    @app.post("/resume-session")
+    def resume_session():
+        requested_session_key = str(request.form.get("session_key") or "").strip()
+        available_sessions = {
+            candidate["session_key"]: candidate
+            for candidate in UiStateStore.list_resumable_sessions(current_session_key=current_ui_session_key(), limit=25)
+        }
+        selected = available_sessions.get(requested_session_key)
+        if selected is None:
+            flash("That saved scan session is no longer available.", "error")
+            return redirect(url_for("home"))
+
+        session["ui_session_key"] = requested_session_key
+        session.modified = True
+        flash(
+            f"Resumed {selected['dat_name']} run {int(selected['run_number'] or 0) or 1}.",
+            "success",
+        )
+        return redirect(url_for("home"))
 
     @app.post("/scan/<field_name>")
     def scan_field(field_name: str):

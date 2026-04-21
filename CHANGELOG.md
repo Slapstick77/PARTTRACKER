@@ -16,12 +16,25 @@ This file tracks notable changes made to the NEWTRACKER application during activ
 
 - Added an admin `Send Test Log` action so the configured report folder can be verified on local or network paths without waiting for a real failure.
 
+### Changed
+
+- Main-scanner progress is now treated as resumable only after at least one part has actually been scanned; loading a DAT with zero scanned parts no longer creates durable in-progress progress state.
+- Fresh browser sessions now auto-resume the latest scanned main-scanner batch, and the home page can offer a resume card when a blank session can recover saved scanned work.
+
 ### Validation
 
 - Verified the updated Python package compiles locally.
 - Verified the atomic write helper retries a transient replace failure and still completes the write.
 - Verified `save_scan_cache()` no longer raises when the cache write path throws `PermissionError`.
 - Verified a manual test log can be created through the configured report-writer path.
+- Verified a fresh session no longer auto-resumes zero-scan DAT loads, while a saved scanned batch can still be auto-resumed.
+- Verified the completed-list tracker cleanup removed the stale zero-scan `Prog` rows and left zero remaining `Prog` groups in the live database.
+
+### Fixed
+
+- Fixed main-scanner DAT switching so once any part from the current batch has been scanned, scanning a different DAT is blocked until the current batch is completed or force-completed.
+- Fixed abandoned zero-scan DAT loads leaving stale `Prog` tracker rows in the completed list by discarding those transient flat-scan sessions and their tracker history.
+- Fixed startup/session cleanup so stale zero-scan saved scanner state is cleared automatically instead of repeatedly resurfacing abandoned DAT loads.
 
 ## 2026-04-20
 

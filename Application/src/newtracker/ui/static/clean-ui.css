@@ -166,6 +166,50 @@ button.secondary.danger {
   color: #fff;
 }
 
+.resume-session-card {
+  margin-top: 12px;
+  padding: 16px 18px;
+  display: grid;
+  gap: 12px;
+  background: linear-gradient(135deg, #eef5ff 0%, #fbfdff 100%);
+  border: 1px solid #bfd3f8;
+  border-radius: 18px;
+}
+
+.resume-session-card h2 {
+  margin-bottom: 6px;
+}
+
+.resume-session-card .muted {
+  margin-bottom: 0;
+}
+
+.resume-session-list {
+  display: grid;
+  gap: 10px;
+}
+
+.resume-session-form {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.resume-session-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.resume-session-meta {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
 .controls-layout {
   margin-top: 12px;
   display: grid;

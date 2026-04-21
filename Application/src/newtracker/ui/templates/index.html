@@ -49,6 +49,28 @@
           {% endif %}
         {% endwith %}
 
+        {% if resume_candidates %}
+        <div class="resume-session-card">
+          <div>
+            <p class="eyebrow">Resume Scan</p>
+            <h2>Saved in-progress scans found</h2>
+            <p class="muted">This page opened with a blank session. Resume one of the saved scans below.</p>
+          </div>
+          <div class="resume-session-list">
+            {% for candidate in resume_candidates %}
+            <form method="post" action="{{ url_for('resume_session') }}" class="resume-session-form">
+              <input type="hidden" name="session_key" value="{{ candidate.session_key }}">
+              <div class="resume-session-copy">
+                <strong>{{ candidate.dat_name }}</strong>
+                <span class="resume-session-meta">Run {{ candidate.run_number if candidate.run_number else 1 }} · Remaining {{ candidate.expected_total }} · Scanned {{ candidate.scanned_total }} · Updated {{ candidate.updated_at }}</span>
+              </div>
+              <button type="submit" class="secondary">Resume</button>
+            </form>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
         <div class="controls-layout">
           <div class="control-column">
             <form method="post" action="{{ url_for('scan_field', field_name='machine_code') }}" class="scan-box compact {% if state.active_field == 'machine_code' %}active{% endif %}">

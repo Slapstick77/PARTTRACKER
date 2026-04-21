@@ -31,8 +31,14 @@ class UiStateError(ValueError):
 
 
 class UiStateStore:
+    _zero_scan_cleanup_ran = False
+
+    @staticmethod
+    def _safe_session_key(session_key: str | None) -> str:
+        return re.sub(r"[^A-Za-z0-9_-]", "", session_key or "") or "shared"
+
     def __init__(self, session_key: str | None = None, path: Path | None = None) -> None:
-        safe_session_key = re.sub(r"[^A-Za-z0-9_-]", "", session_key or "") or "shared"
+        safe_session_key = self._safe_session_key(session_key)
         self.session_key = safe_session_key
         self.session_dir = UI_SESSION_DIR / safe_session_key
         self.path = path or (self.session_dir / "ui_scan_state.json")
@@ -41,6 +47,7 @@ class UiStateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_state_if_needed()
         self._migrate_legacy_tracker_to_db_if_needed()
+        self._cleanup_zero_scan_main_batches_if_needed()
         if not self.path.exists():
             self.reset()
         if not self.completed_path.exists():
@@ -91,6 +98,174 @@ class UiStateStore:
             for legacy_path in (LEGACY_UI_STATE_PATH, LEGACY_COMPLETED_LIST_PATH, LEGACY_MISSED_LIST_PATH):
                 if legacy_path.exists():
                     legacy_path.unlink()
+
+    @classmethod
+    def _cleanup_zero_scan_main_batches_if_needed(cls) -> None:
+        with _UI_STATE_LOCK:
+            if cls._zero_scan_cleanup_ran:
+                return
+            try:
+                cls._cleanup_zero_scan_main_batches()
+                cls._cleanup_zero_scan_session_files()
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower():
+                    return
+                raise
+            cls._zero_scan_cleanup_ran = True
+
+    @classmethod
+    def _cleanup_zero_scan_main_batches(cls) -> None:
+        with get_connection() as connection:
+            create_schema(connection)
+            session_rows = connection.execute(
+                """
+                SELECT fss.id
+                FROM flat_scan_sessions fss
+                LEFT JOIN flat_scan_items fsi ON fsi.flat_scan_session_id = fss.id
+                WHERE COALESCE(fss.status, 'open') <> 'completed'
+                GROUP BY fss.id
+                HAVING COALESCE(SUM(fsi.scanned_quantity), 0) = 0
+                """
+            ).fetchall()
+            session_ids = [int(row["id"]) for row in session_rows]
+            if not session_ids:
+                return
+
+            placeholders = ",".join("?" for _ in session_ids)
+            params = tuple(session_ids)
+            connection.execute(
+                f"DELETE FROM part_tracker_history WHERE tracker_key IN (SELECT tracker_key FROM part_tracker_items WHERE flat_scan_session_id IN ({placeholders}) AND stage = 'Prog')",
+                params,
+            )
+            connection.execute(
+                f"DELETE FROM part_tracker_items WHERE flat_scan_session_id IN ({placeholders}) AND stage = 'Prog'",
+                params,
+            )
+            connection.execute(f"DELETE FROM scan_events WHERE flat_scan_session_id IN ({placeholders})", params)
+            connection.execute(f"DELETE FROM flat_scan_items WHERE flat_scan_session_id IN ({placeholders})", params)
+            connection.execute(f"DELETE FROM flat_scan_sessions WHERE id IN ({placeholders})", params)
+            connection.commit()
+
+    @classmethod
+    def _cleanup_zero_scan_session_files(cls) -> None:
+        if not UI_SESSION_DIR.exists():
+            return
+
+        for session_dir in UI_SESSION_DIR.iterdir():
+            if not session_dir.is_dir():
+                continue
+
+            state_path = session_dir / "ui_scan_state.json"
+            if not state_path.exists():
+                continue
+
+            payload = read_json_file(state_path, dict, quarantine_corrupt=True)
+            if not isinstance(payload, dict):
+                continue
+
+            nest_data = str(payload.get("nest_data") or "").strip().upper()
+            raw_scanned_parts = payload.get("scanned_parts")
+            scanned_parts = raw_scanned_parts if isinstance(raw_scanned_parts, list) else []
+            flat_scan_status = str(payload.get("flat_scan_status") or "").strip().lower()
+            if not nest_data or scanned_parts or flat_scan_status == "completed":
+                continue
+
+            payload["formed_queue"] = [
+                item for item in payload.get("formed_queue", []) if str(item.get("dat_name") or "") != nest_data
+            ]
+            payload["nest_data"] = ""
+            payload["update_target"] = ""
+            payload["flat_scan_session_id"] = None
+            payload["flat_scan_status"] = ""
+            payload["current_run_number"] = 0
+            payload["expected_parts"] = []
+            payload["scanned_parts"] = []
+            payload["scan_edit_mode"] = False
+            payload["repeat_scan_pending"] = False
+            payload["pending_repeat_dat"] = ""
+            payload["pending_repeat_run_number"] = None
+
+            machine_code = str(payload.get("machine_code") or "")
+            user_code = str(payload.get("user_code") or "")
+            location_code = str(payload.get("location_code") or "")
+            if machine_code and user_code and location_code:
+                payload["active_field"] = "nest_data"
+                payload["message"] = "Scan NEST DATA"
+            elif machine_code and user_code:
+                payload["active_field"] = "location_code"
+                payload["message"] = "Scan LOCATION"
+            elif machine_code:
+                payload["active_field"] = "user_code"
+                payload["message"] = "Scan USER"
+            else:
+                payload["active_field"] = "machine_code"
+                payload["message"] = "Enter or scan MACHINE"
+            payload["message_level"] = "info"
+            atomic_write_json(state_path, payload)
+
+    @classmethod
+    def list_resumable_sessions(
+        cls,
+        *,
+        current_session_key: str | None = None,
+        limit: int = 5,
+        require_scanned_progress: bool = False,
+    ) -> list[dict[str, Any]]:
+        current_safe_key = cls._safe_session_key(current_session_key)
+        if not UI_SESSION_DIR.exists():
+            return []
+
+        deduped: dict[tuple[str, int, int, int], dict[str, Any]] = {}
+        for session_dir in UI_SESSION_DIR.iterdir():
+            if not session_dir.is_dir() or session_dir.name == current_safe_key:
+                continue
+
+            state_path = session_dir / "ui_scan_state.json"
+            if not state_path.exists():
+                continue
+
+            payload = read_json_file(state_path, dict, quarantine_corrupt=True)
+            if not isinstance(payload, dict):
+                continue
+
+            nest_data = str(payload.get("nest_data") or "").strip().upper()
+            raw_expected_parts = payload.get("expected_parts")
+            expected_parts = raw_expected_parts if isinstance(raw_expected_parts, list) else []
+            raw_scanned_parts = payload.get("scanned_parts")
+            scanned_parts = raw_scanned_parts if isinstance(raw_scanned_parts, list) else []
+            expected_total = len(expected_parts)
+            scanned_total = len(scanned_parts)
+            if require_scanned_progress and scanned_total <= 0:
+                continue
+            if not nest_data or (expected_total <= 0 and scanned_total <= 0):
+                continue
+
+            run_number = int(payload.get("current_run_number") or 0)
+            updated_at = datetime.fromtimestamp(state_path.stat().st_mtime)
+            candidate = {
+                "session_key": session_dir.name,
+                "dat_name": nest_data,
+                "run_number": run_number,
+                "expected_total": expected_total,
+                "scanned_total": scanned_total,
+                "active_field": str(payload.get("active_field") or ""),
+                "updated_at": updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "_updated_timestamp": updated_at.timestamp(),
+            }
+            dedupe_key = (nest_data, run_number, expected_total, scanned_total)
+            existing = deduped.get(dedupe_key)
+            if existing is None or candidate["_updated_timestamp"] > existing["_updated_timestamp"]:
+                deduped[dedupe_key] = candidate
+
+        ordered = sorted(deduped.values(), key=lambda item: item["_updated_timestamp"], reverse=True)
+        return [
+            {
+                key: value
+                for key, value in candidate.items()
+                if key != "_updated_timestamp"
+            }
+            for candidate in ordered[:limit]
+        ]
 
     def _default_state(self) -> dict[str, Any]:
         return {
@@ -348,6 +523,47 @@ class UiStateStore:
         state["repeat_scan_pending"] = False
         state["pending_repeat_dat"] = ""
         state["pending_repeat_run_number"] = None
+
+    @staticmethod
+    def _main_batch_has_scanned_progress(state: dict[str, Any]) -> bool:
+        return bool(state.get("scanned_parts"))
+
+    def _clear_active_main_batch(self, state: dict[str, Any]) -> None:
+        state["nest_data"] = ""
+        state["update_target"] = ""
+        state["flat_scan_session_id"] = None
+        state["flat_scan_status"] = ""
+        state["current_run_number"] = 0
+        state["expected_parts"] = []
+        state["scanned_parts"] = []
+        state["scan_edit_mode"] = False
+        self._clear_repeat_scan_prompt(state)
+
+    def _discard_unscanned_main_batch(self, state: dict[str, Any]) -> None:
+        if self._main_batch_has_scanned_progress(state):
+            raise UiStateError("Cannot discard a batch that already has scanned parts.")
+
+        dat_name = str(state.get("nest_data") or "").strip().upper()
+        flat_scan_session_id = state.get("flat_scan_session_id")
+        if flat_scan_session_id is not None:
+            with get_connection() as connection:
+                create_schema(connection)
+                connection.execute(
+                    "DELETE FROM part_tracker_history WHERE tracker_key IN (SELECT tracker_key FROM part_tracker_items WHERE flat_scan_session_id = ? AND stage = 'Prog')",
+                    (int(flat_scan_session_id),),
+                )
+                connection.execute(
+                    "DELETE FROM part_tracker_items WHERE flat_scan_session_id = ? AND stage = 'Prog'",
+                    (int(flat_scan_session_id),),
+                )
+                connection.execute("DELETE FROM scan_events WHERE flat_scan_session_id = ?", (int(flat_scan_session_id),))
+                connection.execute("DELETE FROM flat_scan_items WHERE flat_scan_session_id = ?", (int(flat_scan_session_id),))
+                connection.execute("DELETE FROM flat_scan_sessions WHERE id = ?", (int(flat_scan_session_id),))
+                connection.commit()
+
+        if dat_name:
+            self._remove_formed_queue_entry(state, dat_name)
+        self._clear_active_main_batch(state)
 
     def _legacy_tracker_stage(self, row: dict[str, Any], default_stage: str) -> str:
         requires_forming = bool(row.get("f_flag") or row.get("requires_forming"))
@@ -1083,7 +1299,6 @@ class UiStateStore:
             rows = self._load_resolved_rows_for_dat(connection, dat_name)
             if not rows:
                 raise UiStateError(f"No resolved parts found for {dat_name}")
-            self._upsert_monitor_units(connection, rows, dat_name=dat_name)
             session_id, session_status, run_number = self._ensure_flat_scan_session(
                 connection,
                 dat_name,
@@ -1095,6 +1310,8 @@ class UiStateStore:
                 "SELECT nest_part_id, expected_quantity, scanned_quantity FROM flat_scan_items WHERE flat_scan_session_id = ?",
                 (session_id,),
             ).fetchall()
+            if any(int(row["scanned_quantity"] or 0) > 0 for row in item_rows):
+                self._upsert_monitor_units(connection, rows, dat_name=dat_name)
             connection.commit()
 
         items_by_nest = {
@@ -1147,7 +1364,8 @@ class UiStateStore:
         state["scanned_parts"] = list(snapshot["scanned_parts"])
         state["scan_edit_mode"] = False
         self._apply_state_defaults_to_parts(state)
-        self._sync_part_tracker_progress(state)
+        if self._main_batch_has_scanned_progress(state):
+            self._sync_part_tracker_progress(state)
         self._queue_formed_from_nest(state, dat_name)
         if state["expected_parts"]:
             state["active_field"] = "part_scan"
@@ -1504,12 +1722,22 @@ class UiStateStore:
                 state["message"] = "Scan NEST DATA"
             state["message_level"] = "info"
         elif field_name == "nest_data":
+            dat_token = self._normalize_dat_token(cleaned)
+            if not dat_token:
+                raise UiStateError("Scanned DAT token was blank.")
+            current_dat = str(state.get("nest_data") or "").strip().upper()
+            if current_dat and dat_token != current_dat:
+                if self._main_batch_has_scanned_progress(state):
+                    raise UiStateError(
+                        f"Cannot switch from {current_dat} after parts have been scanned. Complete or Force Complete the current batch first."
+                    )
+                self._discard_unscanned_main_batch(state)
             with get_connection() as connection:
                 create_schema(connection)
-                rows = self._load_resolved_rows_for_dat(connection, cleaned)
+                rows = self._load_resolved_rows_for_dat(connection, dat_token)
                 if not rows:
-                    raise UiStateError(f"No resolved parts found for {cleaned}")
-                repeat_info = self._load_repeat_scan_info(connection, cleaned, rows)
+                    raise UiStateError(f"No resolved parts found for {dat_token}")
+                repeat_info = self._load_repeat_scan_info(connection, dat_token, rows)
 
             if repeat_info["has_completed_run"]:
                 state["nest_data"] = ""
@@ -1524,11 +1752,11 @@ class UiStateStore:
                 state["message"] = "Program is Already in System. Are you sure you want continue?"
                 state["message_level"] = "warning"
                 state["repeat_scan_pending"] = True
-                state["pending_repeat_dat"] = cleaned
+                state["pending_repeat_dat"] = dat_token
                 state["pending_repeat_run_number"] = int(repeat_info["next_run_number"])
             else:
-                snapshot = self._load_flat_scan_snapshot(cleaned)
-                self._apply_flat_scan_snapshot(state, cleaned, snapshot)
+                snapshot = self._load_flat_scan_snapshot(dat_token)
+                self._apply_flat_scan_snapshot(state, dat_token, snapshot)
         elif field_name == "part_scan":
             if not state.get("nest_data"):
                 raise UiStateError("Scan nest data before scanning parts.")
@@ -1942,6 +2170,7 @@ class UiStateStore:
         state["expected_parts"].pop(target_index)
         self._mark_part_scanned(state, target)
         self._increment_flat_scan_item(state.get("flat_scan_session_id"), target)
+        self._sync_part_tracker_progress(state)
 
         remaining = len(state["expected_parts"])
         if remaining == 0:
@@ -1974,6 +2203,7 @@ class UiStateStore:
             self._mark_part_scanned(state, part)
 
         self._increment_flat_scan_items(state.get("flat_scan_session_id"), pending_parts)
+        self._sync_part_tracker_progress(state)
         state["scan_edit_mode"] = False
         state["active_field"] = "machine_code"
         state["message"] = (
