@@ -29,12 +29,14 @@ This file tracks notable changes made to the NEWTRACKER application during activ
 - Verified a manual test log can be created through the configured report-writer path.
 - Verified a fresh session no longer auto-resumes zero-scan DAT loads, while a saved scanned batch can still be auto-resumed.
 - Verified the completed-list tracker cleanup removed the stale zero-scan `Prog` rows and left zero remaining `Prog` groups in the live database.
+- Verified lowercase-vs-uppercase part scans now match the same expected part number in both the main scanner and formed scanner flows.
 
 ### Fixed
 
 - Fixed main-scanner DAT switching so once any part from the current batch has been scanned, scanning a different DAT is blocked until the current batch is completed or force-completed.
 - Fixed abandoned zero-scan DAT loads leaving stale `Prog` tracker rows in the completed list by discarding those transient flat-scan sessions and their tracker history.
 - Fixed startup/session cleanup so stale zero-scan saved scanner state is cleared automatically instead of repeatedly resurfacing abandoned DAT loads.
+- Fixed case-sensitive part matching in the main scanner and formed scanner so scanned barcodes with lowercase letters still match the uppercase part numbers loaded from DAT data.
 
 ## 2026-04-20
 

@@ -1959,11 +1959,19 @@ class UiStateStore:
         )
 
     def _scan_part_into_formed_list(self, state: dict[str, Any], dat_name: str, part_number: str) -> dict[str, Any]:
+        normalized_part_number = self._normalize_part_token(part_number)
         for dat_list in state.get("formed_active_lists", []):
             if str(dat_list.get("dat_name") or "") != dat_name:
                 continue
             expected = dat_list.get("expected_parts", [])
-            idx = next((index for index, part in enumerate(expected) if str(part.get("part_number") or "") == part_number), None)
+            idx = next(
+                (
+                    index
+                    for index, part in enumerate(expected)
+                    if self._normalize_part_token(part.get("part_number")) == normalized_part_number
+                ),
+                None,
+            )
             if idx is None:
                 raise UiStateError(f"Part {part_number} is not waiting on {dat_name}.")
             row = expected.pop(idx)
@@ -2121,12 +2129,16 @@ class UiStateStore:
             return False
         return bool(re.search(r"\.dat\b", token, flags=re.IGNORECASE))
 
+    @staticmethod
+    def _normalize_part_token(raw: str | None) -> str:
+        return str(raw or "").strip().upper()
+
     def _has_formed_part_target(self, state: dict[str, Any], part_number: str) -> bool:
-        cleaned = str(part_number or "").strip()
+        cleaned = self._normalize_part_token(part_number)
         if not cleaned:
             return False
         if any(
-            str(part.get("part_number") or "") == cleaned
+            self._normalize_part_token(part.get("part_number")) == cleaned
             for dat_list in state.get("formed_active_lists", [])
             for part in dat_list.get("expected_parts", [])
         ):
@@ -2159,8 +2171,13 @@ class UiStateStore:
         return self._is_known_formed_dat_token(state, raw_value)
 
     def _scan_part_into_state(self, state: dict[str, Any], part_number: str) -> None:
+        normalized_part_number = self._normalize_part_token(part_number)
         target_index = next(
-            (index for index, part in enumerate(state["expected_parts"]) if part["part_number"] == part_number),
+            (
+                index
+                for index, part in enumerate(state["expected_parts"])
+                if self._normalize_part_token(part.get("part_number")) == normalized_part_number
+            ),
             None,
         )
         target = state["expected_parts"][target_index] if target_index is not None else None
@@ -2178,7 +2195,7 @@ class UiStateStore:
             state["active_field"] = "machine_code"
             state["message_level"] = "success"
         else:
-            state["message"] = f"Accepted {part_number}. {remaining} part scans remaining."
+            state["message"] = f"Accepted {target['part_number']}. {remaining} part scans remaining."
             state["active_field"] = "part_scan"
             state["message_level"] = "success"
 
@@ -2557,6 +2574,7 @@ class UiStateStore:
     def formed_scan_part(self, part_number: str) -> dict[str, Any]:
         state = self.read()
         cleaned = part_number.strip()
+        normalized_part_number = self._normalize_part_token(cleaned)
         if not cleaned:
             raise UiStateError("Scanned value was blank.")
 
@@ -2572,7 +2590,10 @@ class UiStateStore:
             [
                 self._build_formed_candidate_from_active(dat_list)
                 for dat_list in state.get("formed_active_lists", [])
-                if any(str(part.get("part_number") or "") == cleaned for part in dat_list.get("expected_parts", []))
+                if any(
+                    self._normalize_part_token(part.get("part_number")) == normalized_part_number
+                    for part in dat_list.get("expected_parts", [])
+                )
             ]
         )
         queued_candidates = self._load_queued_formed_part_candidates(state, cleaned)
@@ -2602,7 +2623,14 @@ class UiStateStore:
         matched_dat = None
         for dat_list in state["formed_active_lists"]:
             expected = dat_list["expected_parts"]
-            idx = next((i for i, p in enumerate(expected) if p["part_number"] == cleaned), None)
+            idx = next(
+                (
+                    i
+                    for i, p in enumerate(expected)
+                    if self._normalize_part_token(p.get("part_number")) == normalized_part_number
+                ),
+                None,
+            )
             if idx is not None:
                 row = expected.pop(idx)
                 dat_list["scanned_parts"].append(row)
