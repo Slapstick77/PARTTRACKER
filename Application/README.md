@@ -2,6 +2,27 @@
 
 This folder contains the local application bootstrap for the NEWTRACKER database.
 
+## Fresh clone or VM setup
+
+If this repository is pulled onto a different machine, the clone will not include the local virtual environment or generated application data. Set up the machine with Python 3.10 or newer, create a virtual environment, and install the committed dependencies:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r Application\requirements.txt
+```
+
+The dependency file currently committed for a fresh machine is:
+
+- `Application/requirements.txt`
+
+That file covers the app's third-party imports used by this repository today:
+
+- `Flask`
+- `python-barcode[pillow]`
+
+Generated local files such as the SQLite database, scan session state, barcode PDFs, and admin settings are intentionally not tracked in git and will be created on the target machine.
+
 ## What it does
 
 - Creates a SQLite database for pre-extracted production data
@@ -23,6 +44,8 @@ The SQLite file is created at:
 
 - `Application/data/newtracker.db`
 
+This file is not committed to git.
+
 ## Run
 
 Use the workspace virtual environment Python interpreter to run:
@@ -30,15 +53,30 @@ Use the workspace virtual environment Python interpreter to run:
 - `Application/scripts/init_db.py`
 - `Application/scripts/import_test_data.py`
 
+Example on Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe Application\scripts\init_db.py
+.\.venv\Scripts\python.exe Application\scripts\import_test_data.py
+```
+
 ## Run the clean scan UI
 
 Run:
 
 - `Application/scripts/run_clean_ui.py`
 
+Example:
+
+```powershell
+.\.venv\Scripts\python.exe Application\scripts\run_clean_ui.py
+```
+
 Then open:
 
 - `http://127.0.0.1:5000/`
+
+The UI can create and use the local SQLite database on the target machine, but importing test data is still useful if you want the included sample dataset after a fresh clone.
 
 Current flow:
 
