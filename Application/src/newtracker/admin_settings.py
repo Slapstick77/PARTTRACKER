@@ -27,27 +27,27 @@ LEGACY_ADMIN_PASSWORD = "password"
 DEFAULT_SOURCE_FOLDERS = {
     "amada": {
         "label": "Amada",
-        "test_path": str(APP_ROOT.parent / "TestData" / "Amada"),
+        "test_path": "",
         "production_path": "",
-        "use_production": False,
+        "use_production": True,
     },
     "emk1": {
         "label": "EMK1",
-        "test_path": str(APP_ROOT.parent / "TestData" / "EMK1Test"),
+        "test_path": "",
         "production_path": "",
-        "use_production": False,
+        "use_production": True,
     },
     "laser": {
         "label": "Laser",
-        "test_path": str(APP_ROOT.parent / "TestData" / "Laser"),
+        "test_path": "",
         "production_path": "",
-        "use_production": False,
+        "use_production": True,
     },
     "programming": {
         "label": "Programming Folders",
-        "test_path": str(APP_ROOT.parent / "TestData" / "Programming folders"),
+        "test_path": "",
         "production_path": "",
-        "use_production": False,
+        "use_production": True,
     },
 }
 
@@ -318,8 +318,9 @@ class AdminSettingsStore:
 
         for folder in self.describe_sources(current):
             selected_path = (folder["selected_path"] or "").strip()
+            selected_mode = str(folder.get("selected_mode") or "production")
             if not selected_path:
-                missing_paths.append(f"{folder['label']}: no production folder set")
+                missing_paths.append(f"{folder['label']}: no {selected_mode} folder set")
                 continue
 
             path = Path(selected_path)
