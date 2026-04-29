@@ -54,13 +54,13 @@ Python on Windows App Service is not supported.
 This repository now includes the two deployment files App Service expects when you deploy from the repo root:
 
 - `requirements.txt` at the repo root, which points to `Application/requirements.txt`
-- `startup.txt` at the repo root, which starts Gunicorn against `Application/wsgi.py`
+- `startup.txt` at the repo root, which stores the Gunicorn command used for `Application/wsgi.py`
 
 Recommended App Service settings:
 
 - OS: `Linux`
 - Runtime stack: `Python 3.12`
-- Startup Command: `startup.txt`
+- Startup Command: `gunicorn --bind=0.0.0.0 --timeout 600 --access-logfile '-' --error-logfile '-' --chdir Application wsgi:app`
 - App setting `SCM_DO_BUILD_DURING_DEPLOYMENT`: `1`
 - App setting `NEWTRACKER_DB_BACKEND`: `sqlserver`
 - App setting `NEWTRACKER_SQLSERVER_SERVER`: `newtracker-sql-4821.database.windows.net`

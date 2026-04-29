@@ -422,7 +422,7 @@ class AdminSettingsStore:
             cursor = connection.execute(
                 """
                 INSERT INTO import_runs (
-                    trigger, status, message, started_at, active_paths_json, missing_paths_json
+                    [trigger], status, message, started_at, active_paths_json, missing_paths_json
                 ) VALUES (?, 'running', ?, ?, ?, ?)
                 """,
                 (
@@ -508,7 +508,7 @@ class AdminSettingsStore:
         try:
             with get_connection() as connection:
                 row = connection.execute(
-                    "SELECT * FROM import_runs ORDER BY id DESC LIMIT 1"
+                    "SELECT * FROM import_runs ORDER BY id DESC"
                 ).fetchone()
         except sqlite3.OperationalError:
             return dict(current.get("last_import", self._default_state()["last_import"]))
@@ -889,7 +889,7 @@ def run_import_cycle(store: AdminSettingsStore, *, trigger: str) -> dict[str, An
             started_at=started_at,
             active_paths=active_path_strings,
             missing_paths=missing_paths,
-            **counts,
+            **cast(dict[str, Any], counts),
         )
 
         updated = store.record_import_result(

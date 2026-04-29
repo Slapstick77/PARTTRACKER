@@ -21,6 +21,7 @@ from .admin_settings import (
     ensure_import_monitor_started,
     start_import_job,
 )
+from .db import DatabaseConfigurationError, describe_database_target
 from .error_reports import list_error_reports, resolve_error_report_path
 from .ui_state import UiStateError, UiStateStore
 
@@ -181,6 +182,21 @@ def create_ui_app() -> Flask:
             summary=f"{request.method} {request.path} failed: {exception}",
             traceback_text=trace_text,
             request_info=request_payload,
+        )
+
+    @app.errorhandler(DatabaseConfigurationError)
+    def handle_database_configuration_error(exception: DatabaseConfigurationError):
+        try:
+            target = describe_database_target()
+        except Exception:
+            target = "unavailable"
+        return (
+            "<h1>Database configuration error</h1>"
+            "<p>NEWTRACKER could not open its configured database connection.</p>"
+            f"<p><strong>Target:</strong> {escape(target)}</p>"
+            f"<p><strong>Details:</strong> {escape(str(exception))}</p>"
+            "<p>Check the Azure App Service Application Settings and Azure SQL firewall access, then restart the app.</p>",
+            500,
         )
 
     @app.before_request

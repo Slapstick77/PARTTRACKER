@@ -1164,7 +1164,6 @@ class UiStateStore:
                 FROM part_tracker_history
                 WHERE tracker_key = ?
                 ORDER BY id DESC
-                LIMIT 1
                 """,
                 (str(row["tracker_key"]),),
             ).fetchone()
@@ -1661,7 +1660,6 @@ class UiStateStore:
             FROM flat_scan_sessions
             WHERE nest_id = ?
             ORDER BY COALESCE(run_number, 1) DESC, id DESC
-            LIMIT 1
             """,
             (nest_id,),
         ).fetchone()
@@ -1860,7 +1858,6 @@ class UiStateStore:
             FROM flat_scan_sessions
             WHERE nest_id = ?
             ORDER BY COALESCE(run_number, 1) DESC, id DESC
-            LIMIT 1
             """,
             (nest_id,),
         ).fetchone()
@@ -3599,7 +3596,6 @@ class UiStateStore:
                     FROM part_tracker_history
                     WHERE tracker_key = ?
                     ORDER BY id DESC
-                    LIMIT 1
                     """,
                     (cleaned,),
                 ).fetchone()

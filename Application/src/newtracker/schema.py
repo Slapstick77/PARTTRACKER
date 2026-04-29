@@ -431,7 +431,7 @@ def _create_schema_sqlserver(connection: Any) -> None:
         BEGIN
             CREATE TABLE dbo.import_runs (
                 id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                trigger NVARCHAR(50) NOT NULL,
+                [trigger] NVARCHAR(50) NOT NULL,
                 status NVARCHAR(50) NOT NULL,
                 message NVARCHAR(MAX) NOT NULL,
                 started_at DATETIME2(0) NOT NULL,
@@ -986,7 +986,7 @@ def create_schema(connection: Any) -> None:
 
         CREATE TABLE IF NOT EXISTS import_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trigger TEXT NOT NULL,
+            [trigger] TEXT NOT NULL,
             status TEXT NOT NULL,
             message TEXT NOT NULL,
             started_at TEXT NOT NULL,

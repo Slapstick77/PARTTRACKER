@@ -147,5 +147,13 @@ def get_connection() -> Any:
             )
         except SqlServerDriverMissingError as exc:
             raise DatabaseConfigurationError(str(exc)) from exc
+        except Exception as exc:
+            detail = str(exc).strip()
+            suffix = f" Original error: {detail}" if detail else ""
+            raise DatabaseConfigurationError(
+                "Unable to connect to SQL Server with the configured NEWTRACKER_SQLSERVER_* settings. "
+                "Check the server name, database name, username, password, and Azure SQL firewall access."
+                f"{suffix}"
+            ) from exc
 
     raise DatabaseConfigurationError(f"Unsupported database backend '{settings.backend}'.")
