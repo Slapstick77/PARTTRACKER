@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import math
 import re
-import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,9 +11,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "data"
+SRC_DIR = ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from newtracker.db import DATA_DIR, DatabaseConfigurationError, get_connection
+
 DEFAULT_OUTPUT_DIR = DATA_DIR / "barcode_sheets"
-DB_PATH = DATA_DIR / "newtracker.db"
 
 PAGE_WIDTH = 2550
 PAGE_HEIGHT = 3300
@@ -323,27 +326,26 @@ def build_master_entries() -> dict[str, list[BarcodeEntry]]:
 
 
 def fetch_dat_parts(dat_name: str) -> list[DatPartEntry]:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            """
-            SELECT
-                barcode_filename,
-                part_number,
-                part_revision,
-                quantity_nested,
-                requires_forming,
-                com_number,
-                form_value
-            FROM resolved_nest_parts
-            WHERE barcode_filename = ?
-            ORDER BY requires_forming DESC, part_number
-            """,
-            (dat_name,),
-        ).fetchall()
-    finally:
-        conn.close()
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    barcode_filename,
+                    part_number,
+                    part_revision,
+                    quantity_nested,
+                    requires_forming,
+                    com_number,
+                    form_value
+                FROM resolved_nest_parts
+                WHERE barcode_filename = ?
+                ORDER BY requires_forming DESC, part_number
+                """,
+                (dat_name,),
+            ).fetchall()
+    except DatabaseConfigurationError as exc:
+        raise ValueError(str(exc)) from exc
 
     return [
         DatPartEntry(

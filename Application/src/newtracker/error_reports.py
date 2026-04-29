@@ -7,10 +7,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
-from .db import APP_ROOT
+from .db import DATA_DIR
 from .persistence import atomic_write_text
 
-DEFAULT_ERROR_REPORT_DIR = APP_ROOT / "data" / "error_reports"
+DEFAULT_ERROR_REPORT_DIR = DATA_DIR / "error_reports"
 
 
 def default_error_report_directory() -> Path:

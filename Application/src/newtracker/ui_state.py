@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sqlite3
@@ -8,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .db import DATA_DIR, get_connection
+from .db import DATA_DIR, get_database_settings, get_connection
 from .importer import is_ignored_source_path
 from .persistence import atomic_write_json, read_json_file
 from .schema import create_schema
@@ -32,10 +33,659 @@ class UiStateError(ValueError):
 
 class UiStateStore:
     _zero_scan_cleanup_ran = False
+    _session_store_ready = False
+
+    @staticmethod
+    def _db_backend() -> str:
+        try:
+            return get_database_settings().backend
+        except Exception:
+            return "sqlite"
 
     @staticmethod
     def _safe_session_key(session_key: str | None) -> str:
         return re.sub(r"[^A-Za-z0-9_-]", "", session_key or "") or "shared"
+
+    @classmethod
+    def _ensure_session_store_schema(cls) -> None:
+        with _UI_STATE_LOCK:
+            if cls._session_store_ready:
+                return
+            with get_connection() as connection:
+                create_schema(connection)
+            cls._session_store_ready = True
+
+    @staticmethod
+    def _decode_state_json(raw_value: Any) -> dict[str, Any]:
+        try:
+            payload = json.loads(str(raw_value or "{}"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _decode_list_json(raw_value: Any) -> list[dict[str, Any]]:
+        try:
+            payload = json.loads(str(raw_value or "[]"))
+        except Exception:
+            return []
+        return payload if isinstance(payload, list) else []
+
+    @staticmethod
+    def _encode_json(payload: Any) -> str:
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+    @classmethod
+    def _load_session_row(cls, session_key: str):
+        cls._ensure_session_store_schema()
+        with get_connection() as connection:
+            return connection.execute(
+                """
+                SELECT session_key, state_json, completed_json, missed_json, updated_at
+                FROM ui_session_state
+                WHERE session_key = ?
+                """,
+                (session_key,),
+            ).fetchone()
+
+    @classmethod
+    def _session_record_exists(cls, session_key: str) -> bool:
+        return cls._load_session_row(session_key) is not None
+
+    @classmethod
+    def _upsert_session_row(
+        cls,
+        connection: Any,
+        *,
+        session_key: str,
+        state_json: str,
+        completed_json: str,
+        missed_json: str,
+    ) -> None:
+        if cls._db_backend() == "sqlserver":
+            update_cursor = connection.execute(
+                """
+                UPDATE ui_session_state
+                SET state_json = ?, completed_json = ?, missed_json = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE session_key = ?
+                """,
+                (state_json, completed_json, missed_json, session_key),
+            )
+            if int(getattr(update_cursor, "rowcount", 0) or 0) == 0:
+                connection.execute(
+                    """
+                    INSERT INTO ui_session_state (session_key, state_json, completed_json, missed_json, updated_at)
+                    SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM ui_session_state WHERE session_key = ?
+                    )
+                    """,
+                    (session_key, state_json, completed_json, missed_json, session_key),
+                )
+            return
+
+        connection.execute(
+            """
+            INSERT INTO ui_session_state (session_key, state_json, completed_json, missed_json, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(session_key) DO UPDATE SET
+                state_json = excluded.state_json,
+                completed_json = excluded.completed_json,
+                missed_json = excluded.missed_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (session_key, state_json, completed_json, missed_json),
+        )
+
+    @staticmethod
+    def _insert_part_tracker_row(connection: Any, row: tuple[Any, ...]) -> None:
+        connection.execute(
+            """
+            INSERT INTO part_tracker_items (
+                tracker_key,
+                flat_scan_session_id,
+                run_number,
+                dat_name,
+                nest_part_id,
+                scan_sequence,
+                part_number,
+                part_revision,
+                com_number,
+                machine,
+                user_code,
+                location,
+                requires_forming,
+                stage,
+                stage_updated_at,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            row,
+        )
+
+    @classmethod
+    def _insert_missing_tracker_rows(cls, connection: Any, rows: list[tuple[Any, ...]]) -> None:
+        if not rows:
+            return
+        if cls._db_backend() != "sqlserver":
+            connection.executemany(
+                """
+                INSERT INTO part_tracker_items (
+                    tracker_key,
+                    flat_scan_session_id,
+                    run_number,
+                    dat_name,
+                    nest_part_id,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    stage_updated_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tracker_key) DO NOTHING
+                """,
+                rows,
+            )
+            return
+
+        for row in rows:
+            tracker_key = str(row[0] or "")
+            exists = connection.execute(
+                "SELECT 1 FROM part_tracker_items WHERE tracker_key = ?",
+                (tracker_key,),
+            ).fetchone()
+            if exists is None:
+                cls._insert_part_tracker_row(connection, row)
+
+    @classmethod
+    def _upsert_part_tracker_progress_rows(cls, connection: Any, rows: list[tuple[Any, ...]]) -> None:
+        if not rows:
+            return
+        if cls._db_backend() != "sqlserver":
+            connection.executemany(
+                """
+                INSERT INTO part_tracker_items (
+                    tracker_key,
+                    flat_scan_session_id,
+                    run_number,
+                    dat_name,
+                    nest_part_id,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    stage_updated_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tracker_key) DO UPDATE SET
+                    flat_scan_session_id = COALESCE(excluded.flat_scan_session_id, part_tracker_items.flat_scan_session_id),
+                    run_number = excluded.run_number,
+                    dat_name = excluded.dat_name,
+                    nest_part_id = COALESCE(excluded.nest_part_id, part_tracker_items.nest_part_id),
+                    scan_sequence = excluded.scan_sequence,
+                    part_revision = excluded.part_revision,
+                    requires_forming = excluded.requires_forming,
+                    part_number = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.part_number
+                        ELSE part_tracker_items.part_number
+                    END,
+                    com_number = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.com_number
+                        ELSE part_tracker_items.com_number
+                    END,
+                    machine = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.machine
+                        ELSE part_tracker_items.machine
+                    END,
+                    user_code = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.user_code
+                        ELSE part_tracker_items.user_code
+                    END,
+                    location = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.location
+                        ELSE part_tracker_items.location
+                    END,
+                    stage_updated_at = CASE
+                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.stage_updated_at
+                        ELSE part_tracker_items.stage_updated_at
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                rows,
+            )
+            return
+
+        for row in rows:
+            (
+                tracker_key,
+                flat_scan_session_id,
+                run_number,
+                dat_name,
+                nest_part_id,
+                scan_sequence,
+                part_number,
+                part_revision,
+                com_number,
+                machine,
+                user_code,
+                location,
+                requires_forming,
+                _stage,
+                stage_updated_at,
+                _created_at,
+                updated_at,
+            ) = row
+            existing = connection.execute(
+                "SELECT stage FROM part_tracker_items WHERE tracker_key = ?",
+                (str(tracker_key or ""),),
+            ).fetchone()
+            if existing is None:
+                cls._insert_part_tracker_row(connection, row)
+                continue
+
+            current_stage = str(existing["stage"] or TRACKER_STAGE_PROG).strip().lower()
+            if current_stage == TRACKER_STAGE_PROG.lower():
+                connection.execute(
+                    """
+                    UPDATE part_tracker_items
+                    SET flat_scan_session_id = COALESCE(?, flat_scan_session_id),
+                        run_number = ?,
+                        dat_name = ?,
+                        nest_part_id = COALESCE(?, nest_part_id),
+                        scan_sequence = ?,
+                        part_number = ?,
+                        part_revision = ?,
+                        com_number = ?,
+                        machine = ?,
+                        user_code = ?,
+                        location = ?,
+                        requires_forming = ?,
+                        stage_updated_at = ?,
+                        updated_at = ?
+                    WHERE tracker_key = ?
+                    """,
+                    (
+                        flat_scan_session_id,
+                        run_number,
+                        dat_name,
+                        nest_part_id,
+                        scan_sequence,
+                        part_number,
+                        part_revision,
+                        com_number,
+                        machine,
+                        user_code,
+                        location,
+                        requires_forming,
+                        stage_updated_at,
+                        updated_at,
+                        tracker_key,
+                    ),
+                )
+                continue
+
+            connection.execute(
+                """
+                UPDATE part_tracker_items
+                SET flat_scan_session_id = COALESCE(?, flat_scan_session_id),
+                    run_number = ?,
+                    dat_name = ?,
+                    nest_part_id = COALESCE(?, nest_part_id),
+                    scan_sequence = ?,
+                    part_revision = ?,
+                    requires_forming = ?,
+                    updated_at = ?
+                WHERE tracker_key = ?
+                """,
+                (
+                    flat_scan_session_id,
+                    run_number,
+                    dat_name,
+                    nest_part_id,
+                    scan_sequence,
+                    part_revision,
+                    requires_forming,
+                    updated_at,
+                    tracker_key,
+                ),
+            )
+
+    @classmethod
+    def _upsert_part_tracker_stage_rows(cls, connection: Any, rows: list[tuple[Any, ...]]) -> None:
+        if not rows:
+            return
+        if cls._db_backend() != "sqlserver":
+            connection.executemany(
+                """
+                INSERT INTO part_tracker_items (
+                    tracker_key,
+                    flat_scan_session_id,
+                    run_number,
+                    dat_name,
+                    nest_part_id,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    stage_updated_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tracker_key) DO UPDATE SET
+                    flat_scan_session_id = COALESCE(excluded.flat_scan_session_id, part_tracker_items.flat_scan_session_id),
+                    run_number = excluded.run_number,
+                    dat_name = excluded.dat_name,
+                    nest_part_id = COALESCE(excluded.nest_part_id, part_tracker_items.nest_part_id),
+                    scan_sequence = excluded.scan_sequence,
+                    part_number = excluded.part_number,
+                    part_revision = excluded.part_revision,
+                    com_number = excluded.com_number,
+                    machine = excluded.machine,
+                    user_code = excluded.user_code,
+                    location = excluded.location,
+                    requires_forming = excluded.requires_forming,
+                    stage = excluded.stage,
+                    stage_updated_at = excluded.stage_updated_at,
+                    updated_at = excluded.updated_at
+                """,
+                rows,
+            )
+            return
+
+        for row in rows:
+            (
+                tracker_key,
+                flat_scan_session_id,
+                run_number,
+                dat_name,
+                nest_part_id,
+                scan_sequence,
+                part_number,
+                part_revision,
+                com_number,
+                machine,
+                user_code,
+                location,
+                requires_forming,
+                stage,
+                stage_updated_at,
+                _created_at,
+                updated_at,
+            ) = row
+            exists = connection.execute(
+                "SELECT 1 FROM part_tracker_items WHERE tracker_key = ?",
+                (str(tracker_key or ""),),
+            ).fetchone()
+            if exists is None:
+                cls._insert_part_tracker_row(connection, row)
+                continue
+
+            connection.execute(
+                """
+                UPDATE part_tracker_items
+                SET flat_scan_session_id = COALESCE(?, flat_scan_session_id),
+                    run_number = ?,
+                    dat_name = ?,
+                    nest_part_id = COALESCE(?, nest_part_id),
+                    scan_sequence = ?,
+                    part_number = ?,
+                    part_revision = ?,
+                    com_number = ?,
+                    machine = ?,
+                    user_code = ?,
+                    location = ?,
+                    requires_forming = ?,
+                    stage = ?,
+                    stage_updated_at = ?,
+                    updated_at = ?
+                WHERE tracker_key = ?
+                """,
+                (
+                    flat_scan_session_id,
+                    run_number,
+                    dat_name,
+                    nest_part_id,
+                    scan_sequence,
+                    part_number,
+                    part_revision,
+                    com_number,
+                    machine,
+                    user_code,
+                    location,
+                    requires_forming,
+                    stage,
+                    stage_updated_at,
+                    updated_at,
+                    tracker_key,
+                ),
+            )
+
+    @classmethod
+    def _insert_monitor_unit_source_if_missing(cls, connection: Any, monitor_unit_id: int, dat_name: str) -> None:
+        if cls._db_backend() != "sqlserver":
+            connection.execute(
+                "INSERT OR IGNORE INTO monitor_unit_sources (monitor_unit_id, barcode_filename) VALUES (?, ?)",
+                (monitor_unit_id, dat_name),
+            )
+            return
+
+        exists = connection.execute(
+            "SELECT 1 FROM monitor_unit_sources WHERE monitor_unit_id = ? AND barcode_filename = ?",
+            (monitor_unit_id, dat_name),
+        ).fetchone()
+        if exists is None:
+            connection.execute(
+                "INSERT INTO monitor_unit_sources (monitor_unit_id, barcode_filename) VALUES (?, ?)",
+                (monitor_unit_id, dat_name),
+            )
+
+    @classmethod
+    def _upsert_flat_scan_item_row(
+        cls,
+        connection: Any,
+        *,
+        flat_scan_session_id: int,
+        nest_part_id: int,
+        expected_quantity: int,
+        requires_forming: int,
+    ) -> None:
+        if cls._db_backend() != "sqlserver":
+            connection.execute(
+                """
+                INSERT INTO flat_scan_items (
+                    flat_scan_session_id,
+                    nest_part_id,
+                    expected_quantity,
+                    scanned_quantity,
+                    is_complete,
+                    requires_forming
+                ) VALUES (?, ?, ?, 0, 0, ?)
+                ON CONFLICT(flat_scan_session_id, nest_part_id) DO UPDATE SET
+                    expected_quantity = excluded.expected_quantity,
+                    requires_forming = excluded.requires_forming,
+                    is_complete = CASE
+                        WHEN flat_scan_items.scanned_quantity >= excluded.expected_quantity THEN 1
+                        ELSE 0
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (flat_scan_session_id, nest_part_id, expected_quantity, requires_forming),
+            )
+            return
+
+        exists = connection.execute(
+            "SELECT 1 FROM flat_scan_items WHERE flat_scan_session_id = ? AND nest_part_id = ?",
+            (flat_scan_session_id, nest_part_id),
+        ).fetchone()
+        if exists is None:
+            connection.execute(
+                """
+                INSERT INTO flat_scan_items (
+                    flat_scan_session_id,
+                    nest_part_id,
+                    expected_quantity,
+                    scanned_quantity,
+                    is_complete,
+                    requires_forming
+                ) VALUES (?, ?, ?, 0, 0, ?)
+                """,
+                (flat_scan_session_id, nest_part_id, expected_quantity, requires_forming),
+            )
+            return
+
+        connection.execute(
+            """
+            UPDATE flat_scan_items
+            SET expected_quantity = ?,
+                requires_forming = ?,
+                is_complete = CASE
+                    WHEN scanned_quantity >= ? THEN 1
+                    ELSE 0
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE flat_scan_session_id = ? AND nest_part_id = ?
+            """,
+            (expected_quantity, requires_forming, expected_quantity, flat_scan_session_id, nest_part_id),
+        )
+
+    @classmethod
+    def _upsert_forming_batch_item_row(
+        cls,
+        connection: Any,
+        *,
+        forming_batch_id: int,
+        nest_part_id: int,
+        part_attribute_id: int | None,
+        part_number: str,
+        part_revision: str,
+        expected_quantity: int,
+    ) -> None:
+        if cls._db_backend() != "sqlserver":
+            connection.execute(
+                """
+                INSERT INTO forming_batch_items (
+                    forming_batch_id,
+                    nest_part_id,
+                    part_attribute_id,
+                    part_number,
+                    part_revision,
+                    expected_quantity,
+                    scanned_quantity,
+                    is_complete
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0)
+                ON CONFLICT(forming_batch_id, nest_part_id) DO UPDATE SET
+                    part_attribute_id = excluded.part_attribute_id,
+                    part_number = excluded.part_number,
+                    part_revision = excluded.part_revision,
+                    expected_quantity = excluded.expected_quantity,
+                    is_complete = CASE
+                        WHEN forming_batch_items.scanned_quantity >= excluded.expected_quantity THEN 1
+                        ELSE 0
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (forming_batch_id, nest_part_id, part_attribute_id, part_number, part_revision, expected_quantity),
+            )
+            return
+
+        exists = connection.execute(
+            "SELECT 1 FROM forming_batch_items WHERE forming_batch_id = ? AND nest_part_id = ?",
+            (forming_batch_id, nest_part_id),
+        ).fetchone()
+        if exists is None:
+            connection.execute(
+                """
+                INSERT INTO forming_batch_items (
+                    forming_batch_id,
+                    nest_part_id,
+                    part_attribute_id,
+                    part_number,
+                    part_revision,
+                    expected_quantity,
+                    scanned_quantity,
+                    is_complete
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0)
+                """,
+                (forming_batch_id, nest_part_id, part_attribute_id, part_number, part_revision, expected_quantity),
+            )
+            return
+
+        connection.execute(
+            """
+            UPDATE forming_batch_items
+            SET part_attribute_id = ?,
+                part_number = ?,
+                part_revision = ?,
+                expected_quantity = ?,
+                is_complete = CASE
+                    WHEN scanned_quantity >= ? THEN 1
+                    ELSE 0
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE forming_batch_id = ? AND nest_part_id = ?
+            """,
+            (
+                part_attribute_id,
+                part_number,
+                part_revision,
+                expected_quantity,
+                expected_quantity,
+                forming_batch_id,
+                nest_part_id,
+            ),
+        )
+
+    @classmethod
+    def _write_session_documents(
+        cls,
+        session_key: str,
+        *,
+        state: dict[str, Any] | None = None,
+        completed: list[dict[str, Any]] | None = None,
+        missed: list[dict[str, Any]] | None = None,
+    ) -> None:
+        cls._ensure_session_store_schema()
+        with _UI_STATE_LOCK:
+            with get_connection() as connection:
+                row = connection.execute(
+                    "SELECT state_json, completed_json, missed_json FROM ui_session_state WHERE session_key = ?",
+                    (session_key,),
+                ).fetchone()
+                current_state = cls._decode_state_json(row["state_json"]) if row is not None else cls._default_state()
+                current_completed = cls._decode_list_json(row["completed_json"]) if row is not None else []
+                current_missed = cls._decode_list_json(row["missed_json"]) if row is not None else []
+
+                next_state = dict(state) if state is not None else current_state
+                next_completed = list(completed) if completed is not None else current_completed
+                next_missed = list(missed) if missed is not None else current_missed
+
+                cls._upsert_session_row(
+                    connection,
+                    session_key=session_key,
+                    state_json=cls._encode_json(next_state),
+                    completed_json=cls._encode_json(next_completed),
+                    missed_json=cls._encode_json(next_missed),
+                )
+                connection.commit()
 
     def __init__(self, session_key: str | None = None, path: Path | None = None) -> None:
         safe_session_key = self._safe_session_key(session_key)
@@ -44,57 +694,114 @@ class UiStateStore:
         self.path = path or (self.session_dir / "ui_scan_state.json")
         self.completed_path = self.session_dir / "completed_scan_list.json"
         self.missed_path = self.session_dir / "missed_scan_list.json"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_session_store_schema()
         self._migrate_legacy_state_if_needed()
         self._migrate_legacy_tracker_to_db_if_needed()
         self._cleanup_zero_scan_main_batches_if_needed()
-        if not self.path.exists():
-            self.reset()
-        if not self.completed_path.exists():
-            self._write_completed([])
-        if not self.missed_path.exists():
-            self._write_missed([])
+        if not self._session_record_exists(self.session_key):
+            self._write_session_documents(self.session_key, state=self._default_state(), completed=[], missed=[])
 
-    def _migrate_legacy_state_if_needed(self) -> None:
+    @classmethod
+    def _migrate_legacy_state_if_needed(cls) -> None:
         with _UI_STATE_LOCK:
             if LEGACY_MIGRATION_MARKER.exists():
                 return
 
-            migrated = False
-            if LEGACY_UI_STATE_PATH.exists() and not self.path.exists():
-                payload = read_json_file(LEGACY_UI_STATE_PATH, self._default_state, quarantine_corrupt=True)
-                state = payload if isinstance(payload, dict) else self._default_state()
-                atomic_write_json(self.path, state)
-                migrated = True
+            cls._ensure_session_store_schema()
 
-            if LEGACY_COMPLETED_LIST_PATH.exists() and not self.completed_path.exists():
-                payload = read_json_file(LEGACY_COMPLETED_LIST_PATH, list, quarantine_corrupt=True)
-                rows = payload if isinstance(payload, list) else []
-                atomic_write_json(self.completed_path, rows)
-                migrated = True
+            source_specs: dict[str, dict[str, Path]] = {}
+            shared_spec = source_specs.setdefault("shared", {})
+            if LEGACY_UI_STATE_PATH.exists():
+                shared_spec["state"] = LEGACY_UI_STATE_PATH
+            if LEGACY_COMPLETED_LIST_PATH.exists():
+                shared_spec["completed"] = LEGACY_COMPLETED_LIST_PATH
+            if LEGACY_MISSED_LIST_PATH.exists():
+                shared_spec["missed"] = LEGACY_MISSED_LIST_PATH
 
-            if LEGACY_MISSED_LIST_PATH.exists() and not self.missed_path.exists():
-                payload = read_json_file(LEGACY_MISSED_LIST_PATH, list, quarantine_corrupt=True)
-                rows = payload if isinstance(payload, list) else []
-                atomic_write_json(self.missed_path, rows)
-                migrated = True
+            if UI_SESSION_DIR.exists():
+                for session_dir in UI_SESSION_DIR.iterdir():
+                    if not session_dir.is_dir():
+                        continue
+                    session_key = cls._safe_session_key(session_dir.name)
+                    spec = source_specs.setdefault(session_key, {})
+                    state_path = session_dir / "ui_scan_state.json"
+                    completed_path = session_dir / "completed_scan_list.json"
+                    missed_path = session_dir / "missed_scan_list.json"
+                    if state_path.exists():
+                        spec["state"] = state_path
+                    if completed_path.exists():
+                        spec["completed"] = completed_path
+                    if missed_path.exists():
+                        spec["missed"] = missed_path
 
-            if migrated:
-                atomic_write_json(
-                    LEGACY_MIGRATION_MARKER,
-                    {
-                        "migrated_at": datetime.now().isoformat(timespec="seconds"),
-                        "session_key": self.session_key,
-                    },
-                )
+            migrated_sessions = 0
+            with get_connection() as connection:
+                for session_key, spec in source_specs.items():
+                    row = connection.execute(
+                        "SELECT state_json, completed_json, missed_json FROM ui_session_state WHERE session_key = ?",
+                        (session_key,),
+                    ).fetchone()
+                    state_payload = cls._decode_state_json(row["state_json"]) if row is not None else cls._default_state()
+                    completed_payload = cls._decode_list_json(row["completed_json"]) if row is not None else []
+                    missed_payload = cls._decode_list_json(row["missed_json"]) if row is not None else []
+                    changed = False
+
+                    state_path = spec.get("state")
+                    if state_path is not None and (row is None or state_payload == cls._default_state()):
+                        payload = read_json_file(state_path, cls._default_state, quarantine_corrupt=True)
+                        if isinstance(payload, dict):
+                            state_payload = payload
+                            changed = True
+
+                    completed_path = spec.get("completed")
+                    if completed_path is not None and (row is None or not completed_payload):
+                        payload = read_json_file(completed_path, list, quarantine_corrupt=True)
+                        if isinstance(payload, list):
+                            completed_payload = payload
+                            changed = True
+
+                    missed_path = spec.get("missed")
+                    if missed_path is not None and (row is None or not missed_payload):
+                        payload = read_json_file(missed_path, list, quarantine_corrupt=True)
+                        if isinstance(payload, list):
+                            missed_payload = payload
+                            changed = True
+
+                    if not changed:
+                        continue
+
+                    cls._upsert_session_row(
+                        connection,
+                        session_key=session_key,
+                        state_json=cls._encode_json(state_payload),
+                        completed_json=cls._encode_json(completed_payload),
+                        missed_json=cls._encode_json(missed_payload),
+                    )
+                    migrated_sessions += 1
+
+                connection.commit()
+
+            atomic_write_json(
+                LEGACY_MIGRATION_MARKER,
+                {
+                    "migrated_at": datetime.now().isoformat(timespec="seconds"),
+                    "sessions": migrated_sessions,
+                },
+            )
 
     @classmethod
     def clear_all_persisted_state(cls) -> None:
         with _UI_STATE_LOCK:
+            cls._ensure_session_store_schema()
+            with get_connection() as connection:
+                connection.execute("DELETE FROM ui_session_state")
+                connection.commit()
             if UI_SESSION_DIR.exists():
                 shutil.rmtree(UI_SESSION_DIR, ignore_errors=True)
             if PART_TRACKER_MIGRATION_MARKER.exists():
                 PART_TRACKER_MIGRATION_MARKER.unlink()
+            if LEGACY_MIGRATION_MARKER.exists():
+                LEGACY_MIGRATION_MARKER.unlink()
             for legacy_path in (LEGACY_UI_STATE_PATH, LEGACY_COMPLETED_LIST_PATH, LEGACY_MISSED_LIST_PATH):
                 if legacy_path.exists():
                     legacy_path.unlink()
@@ -148,60 +855,62 @@ class UiStateStore:
 
     @classmethod
     def _cleanup_zero_scan_session_files(cls) -> None:
-        if not UI_SESSION_DIR.exists():
-            return
+        cls._migrate_legacy_state_if_needed()
+        cls._ensure_session_store_schema()
 
-        for session_dir in UI_SESSION_DIR.iterdir():
-            if not session_dir.is_dir():
-                continue
+        with _UI_STATE_LOCK:
+            with get_connection() as connection:
+                rows = connection.execute("SELECT session_key, state_json FROM ui_session_state").fetchall()
+                for row in rows:
+                    payload = cls._decode_state_json(row["state_json"])
+                    if not payload:
+                        continue
 
-            state_path = session_dir / "ui_scan_state.json"
-            if not state_path.exists():
-                continue
+                    nest_data = str(payload.get("nest_data") or "").strip().upper()
+                    raw_scanned_parts = payload.get("scanned_parts")
+                    scanned_parts = raw_scanned_parts if isinstance(raw_scanned_parts, list) else []
+                    flat_scan_status = str(payload.get("flat_scan_status") or "").strip().lower()
+                    if not nest_data or scanned_parts or flat_scan_status == "completed":
+                        continue
 
-            payload = read_json_file(state_path, dict, quarantine_corrupt=True)
-            if not isinstance(payload, dict):
-                continue
+                    payload["formed_queue"] = [
+                        item for item in payload.get("formed_queue", []) if str(item.get("dat_name") or "") != nest_data
+                    ]
+                    payload["nest_data"] = ""
+                    payload["update_target"] = ""
+                    payload["flat_scan_session_id"] = None
+                    payload["flat_scan_status"] = ""
+                    payload["current_run_number"] = 0
+                    payload["expected_parts"] = []
+                    payload["scanned_parts"] = []
+                    payload["scan_edit_mode"] = False
+                    payload["repeat_scan_pending"] = False
+                    payload["pending_repeat_dat"] = ""
+                    payload["pending_repeat_run_number"] = None
 
-            nest_data = str(payload.get("nest_data") or "").strip().upper()
-            raw_scanned_parts = payload.get("scanned_parts")
-            scanned_parts = raw_scanned_parts if isinstance(raw_scanned_parts, list) else []
-            flat_scan_status = str(payload.get("flat_scan_status") or "").strip().lower()
-            if not nest_data or scanned_parts or flat_scan_status == "completed":
-                continue
+                    machine_code = str(payload.get("machine_code") or "")
+                    user_code = str(payload.get("user_code") or "")
+                    location_code = str(payload.get("location_code") or "")
+                    if machine_code and user_code and location_code:
+                        payload["active_field"] = "nest_data"
+                        payload["message"] = "Scan NEST DATA"
+                    elif machine_code and user_code:
+                        payload["active_field"] = "location_code"
+                        payload["message"] = "Scan LOCATION"
+                    elif machine_code:
+                        payload["active_field"] = "user_code"
+                        payload["message"] = "Scan USER"
+                    else:
+                        payload["active_field"] = "machine_code"
+                        payload["message"] = "Enter or scan MACHINE"
+                    payload["message_level"] = "info"
 
-            payload["formed_queue"] = [
-                item for item in payload.get("formed_queue", []) if str(item.get("dat_name") or "") != nest_data
-            ]
-            payload["nest_data"] = ""
-            payload["update_target"] = ""
-            payload["flat_scan_session_id"] = None
-            payload["flat_scan_status"] = ""
-            payload["current_run_number"] = 0
-            payload["expected_parts"] = []
-            payload["scanned_parts"] = []
-            payload["scan_edit_mode"] = False
-            payload["repeat_scan_pending"] = False
-            payload["pending_repeat_dat"] = ""
-            payload["pending_repeat_run_number"] = None
+                    connection.execute(
+                        "UPDATE ui_session_state SET state_json = ?, updated_at = CURRENT_TIMESTAMP WHERE session_key = ?",
+                        (cls._encode_json(payload), str(row["session_key"] or "shared")),
+                    )
 
-            machine_code = str(payload.get("machine_code") or "")
-            user_code = str(payload.get("user_code") or "")
-            location_code = str(payload.get("location_code") or "")
-            if machine_code and user_code and location_code:
-                payload["active_field"] = "nest_data"
-                payload["message"] = "Scan NEST DATA"
-            elif machine_code and user_code:
-                payload["active_field"] = "location_code"
-                payload["message"] = "Scan LOCATION"
-            elif machine_code:
-                payload["active_field"] = "user_code"
-                payload["message"] = "Scan USER"
-            else:
-                payload["active_field"] = "machine_code"
-                payload["message"] = "Enter or scan MACHINE"
-            payload["message_level"] = "info"
-            atomic_write_json(state_path, payload)
+                connection.commit()
 
     @classmethod
     def list_resumable_sessions(
@@ -212,20 +921,22 @@ class UiStateStore:
         require_scanned_progress: bool = False,
     ) -> list[dict[str, Any]]:
         current_safe_key = cls._safe_session_key(current_session_key)
-        if not UI_SESSION_DIR.exists():
-            return []
+        cls._migrate_legacy_state_if_needed()
+        cls._ensure_session_store_schema()
 
         deduped: dict[tuple[str, int, int, int], dict[str, Any]] = {}
-        for session_dir in UI_SESSION_DIR.iterdir():
-            if not session_dir.is_dir() or session_dir.name == current_safe_key:
+        with get_connection() as connection:
+            rows = connection.execute(
+                "SELECT session_key, state_json, updated_at FROM ui_session_state"
+            ).fetchall()
+
+        for row in rows:
+            session_key = cls._safe_session_key(str(row["session_key"] or "shared"))
+            if session_key == current_safe_key:
                 continue
 
-            state_path = session_dir / "ui_scan_state.json"
-            if not state_path.exists():
-                continue
-
-            payload = read_json_file(state_path, dict, quarantine_corrupt=True)
-            if not isinstance(payload, dict):
+            payload = cls._decode_state_json(row["state_json"])
+            if not payload:
                 continue
 
             nest_data = str(payload.get("nest_data") or "").strip().upper()
@@ -241,9 +952,13 @@ class UiStateStore:
                 continue
 
             run_number = int(payload.get("current_run_number") or 0)
-            updated_at = datetime.fromtimestamp(state_path.stat().st_mtime)
+            updated_at_raw = str(row["updated_at"] or "").strip()
+            try:
+                updated_at = datetime.fromisoformat(updated_at_raw.replace(" ", "T"))
+            except ValueError:
+                updated_at = datetime.fromtimestamp(0)
             candidate = {
-                "session_key": session_dir.name,
+                "session_key": session_key,
                 "dat_name": nest_data,
                 "run_number": run_number,
                 "expected_total": expected_total,
@@ -267,7 +982,8 @@ class UiStateStore:
             for candidate in ordered[:limit]
         ]
 
-    def _default_state(self) -> dict[str, Any]:
+    @staticmethod
+    def _default_state() -> dict[str, Any]:
         return {
             "machine_code": "",
             "user_code": "",
@@ -296,36 +1012,37 @@ class UiStateStore:
         }
 
     def read(self) -> dict[str, Any]:
-        with _UI_STATE_LOCK:
-            payload = read_json_file(self.path, self._default_state, quarantine_corrupt=True)
-            if not isinstance(payload, dict):
-                return self._default_state()
-            payload.pop("monitor_units", None)
-            return payload
+        row = self._load_session_row(self.session_key)
+        if row is None:
+            return self._default_state()
+        payload = self._decode_state_json(row["state_json"])
+        if not payload:
+            return self._default_state()
+        payload.pop("monitor_units", None)
+        return payload
 
     def write(self, state: dict[str, Any]) -> None:
-        with _UI_STATE_LOCK:
-            persisted = dict(state)
-            persisted.pop("monitor_units", None)
-            atomic_write_json(self.path, persisted)
+        persisted = dict(state)
+        persisted.pop("monitor_units", None)
+        self._write_session_documents(self.session_key, state=persisted)
 
     def _read_completed(self) -> list[dict[str, Any]]:
-        with _UI_STATE_LOCK:
-            payload = read_json_file(self.completed_path, list, quarantine_corrupt=True)
-            return payload if isinstance(payload, list) else []
+        row = self._load_session_row(self.session_key)
+        if row is None:
+            return []
+        return self._decode_list_json(row["completed_json"])
 
     def _write_completed(self, rows: list[dict[str, Any]]) -> None:
-        with _UI_STATE_LOCK:
-            atomic_write_json(self.completed_path, rows)
+        self._write_session_documents(self.session_key, completed=rows)
 
     def _read_missed(self) -> list[dict[str, Any]]:
-        with _UI_STATE_LOCK:
-            payload = read_json_file(self.missed_path, list, quarantine_corrupt=True)
-            return payload if isinstance(payload, list) else []
+        row = self._load_session_row(self.session_key)
+        if row is None:
+            return []
+        return self._decode_list_json(row["missed_json"])
 
     def _write_missed(self, rows: list[dict[str, Any]]) -> None:
-        with _UI_STATE_LOCK:
-            atomic_write_json(self.missed_path, rows)
+        self._write_session_documents(self.session_key, missed=rows)
 
     @staticmethod
     def _normalize_tracker_stage(stage: str | None, *, requires_forming: bool = False) -> str:
@@ -651,31 +1368,7 @@ class UiStateStore:
                         if not params:
                             continue
 
-                        connection.executemany(
-                            """
-                            INSERT INTO part_tracker_items (
-                                tracker_key,
-                                flat_scan_session_id,
-                                run_number,
-                                dat_name,
-                                nest_part_id,
-                                scan_sequence,
-                                part_number,
-                                part_revision,
-                                com_number,
-                                machine,
-                                user_code,
-                                location,
-                                requires_forming,
-                                stage,
-                                stage_updated_at,
-                                created_at,
-                                updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(tracker_key) DO NOTHING
-                            """,
-                            params,
-                        )
+                        self._insert_missing_tracker_rows(connection, params)
                         migrated_rows += len(params)
 
                     connection.commit()
@@ -748,63 +1441,7 @@ class UiStateStore:
 
         with get_connection() as connection:
             create_schema(connection)
-            connection.executemany(
-                """
-                INSERT INTO part_tracker_items (
-                    tracker_key,
-                    flat_scan_session_id,
-                    run_number,
-                    dat_name,
-                    nest_part_id,
-                    scan_sequence,
-                    part_number,
-                    part_revision,
-                    com_number,
-                    machine,
-                    user_code,
-                    location,
-                    requires_forming,
-                    stage,
-                    stage_updated_at,
-                    created_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(tracker_key) DO UPDATE SET
-                    flat_scan_session_id = COALESCE(excluded.flat_scan_session_id, part_tracker_items.flat_scan_session_id),
-                    run_number = excluded.run_number,
-                    dat_name = excluded.dat_name,
-                    nest_part_id = COALESCE(excluded.nest_part_id, part_tracker_items.nest_part_id),
-                    scan_sequence = excluded.scan_sequence,
-                    part_revision = excluded.part_revision,
-                    requires_forming = excluded.requires_forming,
-                    part_number = CASE
-                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.part_number
-                        ELSE part_tracker_items.part_number
-                    END,
-                    com_number = CASE
-                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.com_number
-                        ELSE part_tracker_items.com_number
-                    END,
-                    machine = CASE
-                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.machine
-                        ELSE part_tracker_items.machine
-                    END,
-                    user_code = CASE
-                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.user_code
-                        ELSE part_tracker_items.user_code
-                    END,
-                    location = CASE
-                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.location
-                        ELSE part_tracker_items.location
-                    END,
-                    stage_updated_at = CASE
-                        WHEN part_tracker_items.stage = 'Prog' THEN excluded.stage_updated_at
-                        ELSE part_tracker_items.stage_updated_at
-                    END,
-                    updated_at = excluded.updated_at
-                """,
-                params,
-            )
+            self._upsert_part_tracker_progress_rows(connection, params)
             self._record_tracker_history(
                 connection,
                 [str(item[0]) for item in params],
@@ -865,46 +1502,7 @@ class UiStateStore:
 
         with get_connection() as connection:
             create_schema(connection)
-            connection.executemany(
-                """
-                INSERT INTO part_tracker_items (
-                    tracker_key,
-                    flat_scan_session_id,
-                    run_number,
-                    dat_name,
-                    nest_part_id,
-                    scan_sequence,
-                    part_number,
-                    part_revision,
-                    com_number,
-                    machine,
-                    user_code,
-                    location,
-                    requires_forming,
-                    stage,
-                    stage_updated_at,
-                    created_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(tracker_key) DO UPDATE SET
-                    flat_scan_session_id = COALESCE(excluded.flat_scan_session_id, part_tracker_items.flat_scan_session_id),
-                    run_number = excluded.run_number,
-                    dat_name = excluded.dat_name,
-                    nest_part_id = COALESCE(excluded.nest_part_id, part_tracker_items.nest_part_id),
-                    scan_sequence = excluded.scan_sequence,
-                    part_number = excluded.part_number,
-                    part_revision = excluded.part_revision,
-                    com_number = excluded.com_number,
-                    machine = excluded.machine,
-                    user_code = excluded.user_code,
-                    location = excluded.location,
-                    requires_forming = excluded.requires_forming,
-                    stage = excluded.stage,
-                    stage_updated_at = excluded.stage_updated_at,
-                    updated_at = excluded.updated_at
-                """,
-                params,
-            )
+            self._upsert_part_tracker_stage_rows(connection, params)
             self._record_tracker_history(
                 connection,
                 [str(item[0]) for item in params],
@@ -1016,7 +1614,7 @@ class UiStateStore:
         }
 
     def reset(self) -> dict[str, Any]:
-        previous = self.read() if self.path.exists() else self._default_state()
+        previous = self.read() if self._session_record_exists(self.session_key) else self._default_state()
         state = self._default_state()
         state["machine_code"] = previous.get("machine_code", "")
         state["user_code"] = previous.get("user_code", "")
@@ -1179,26 +1777,49 @@ class UiStateStore:
 
         activity_at = datetime.now().isoformat(timespec="seconds")
         for com_number in com_numbers:
-            connection.execute(
-                """
-                INSERT INTO monitor_units (com_number, status, started_at, last_activity_at)
-                VALUES (?, 'in_progress', ?, ?)
-                ON CONFLICT(com_number) DO UPDATE SET
-                    status = 'in_progress',
-                    last_activity_at = excluded.last_activity_at
-                """,
-                (com_number, activity_at, activity_at),
-            )
-            if dat_name:
+            if self._db_backend() == "sqlserver":
                 unit_row = connection.execute(
                     "SELECT id FROM monitor_units WHERE com_number = ?",
                     (com_number,),
                 ).fetchone()
-                if unit_row is not None:
-                    connection.execute(
-                        "INSERT OR IGNORE INTO monitor_unit_sources (monitor_unit_id, barcode_filename) VALUES (?, ?)",
-                        (int(unit_row["id"]), dat_name),
+                if unit_row is None:
+                    cursor = connection.execute(
+                        "INSERT INTO monitor_units (com_number, status, started_at, last_activity_at) VALUES (?, 'in_progress', ?, ?)",
+                        (com_number, activity_at, activity_at),
                     )
+                    unit_id = int(cursor.lastrowid) if cursor.lastrowid is not None else 0
+                    if unit_id <= 0:
+                        unit_row = connection.execute(
+                            "SELECT id FROM monitor_units WHERE com_number = ?",
+                            (com_number,),
+                        ).fetchone()
+                        unit_id = int(unit_row["id"]) if unit_row is not None else 0
+                else:
+                    unit_id = int(unit_row["id"])
+                    connection.execute(
+                        "UPDATE monitor_units SET status = 'in_progress', last_activity_at = ? WHERE com_number = ?",
+                        (activity_at, com_number),
+                    )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO monitor_units (com_number, status, started_at, last_activity_at)
+                    VALUES (?, 'in_progress', ?, ?)
+                    ON CONFLICT(com_number) DO UPDATE SET
+                        status = 'in_progress',
+                        last_activity_at = excluded.last_activity_at
+                    """,
+                    (com_number, activity_at, activity_at),
+                )
+                unit_row = connection.execute(
+                    "SELECT id FROM monitor_units WHERE com_number = ?",
+                    (com_number,),
+                ).fetchone()
+                unit_id = int(unit_row["id"]) if unit_row is not None else 0
+
+            if dat_name:
+                if unit_id > 0:
+                    self._insert_monitor_unit_source_if_missing(connection, unit_id, dat_name)
         return com_numbers
 
     def _touch_monitor_units(self, connection, com_numbers: list[str], *, status: str | None = None) -> None:
@@ -1263,26 +1884,12 @@ class UiStateStore:
         for row in rows:
             expected_quantity = max(1, int(row["quantity_nested"] or 0))
             requires_forming = 1 if bool(row["requires_forming"]) else 0
-            connection.execute(
-                """
-                INSERT INTO flat_scan_items (
-                    flat_scan_session_id,
-                    nest_part_id,
-                    expected_quantity,
-                    scanned_quantity,
-                    is_complete,
-                    requires_forming
-                ) VALUES (?, ?, ?, 0, 0, ?)
-                ON CONFLICT(flat_scan_session_id, nest_part_id) DO UPDATE SET
-                    expected_quantity = excluded.expected_quantity,
-                    requires_forming = excluded.requires_forming,
-                    is_complete = CASE
-                        WHEN flat_scan_items.scanned_quantity >= excluded.expected_quantity THEN 1
-                        ELSE 0
-                    END,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (session_id, int(row["nest_part_id"]), expected_quantity, requires_forming),
+            self._upsert_flat_scan_item_row(
+                connection,
+                flat_scan_session_id=session_id,
+                nest_part_id=int(row["nest_part_id"]),
+                expected_quantity=expected_quantity,
+                requires_forming=requires_forming,
             )
 
         return session_id, session_status, run_number
@@ -1489,37 +2096,14 @@ class UiStateStore:
         for nest_part_id, grouped_rows in rows_by_nest.items():
             reference_row = grouped_rows[0]
             expected_quantity = len(grouped_rows)
-            connection.execute(
-                """
-                INSERT INTO forming_batch_items (
-                    forming_batch_id,
-                    nest_part_id,
-                    part_attribute_id,
-                    part_number,
-                    part_revision,
-                    expected_quantity,
-                    scanned_quantity,
-                    is_complete
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0)
-                ON CONFLICT(forming_batch_id, nest_part_id) DO UPDATE SET
-                    part_attribute_id = excluded.part_attribute_id,
-                    part_number = excluded.part_number,
-                    part_revision = excluded.part_revision,
-                    expected_quantity = excluded.expected_quantity,
-                    is_complete = CASE
-                        WHEN forming_batch_items.scanned_quantity >= excluded.expected_quantity THEN 1
-                        ELSE 0
-                    END,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (
-                    batch_id,
-                    nest_part_id,
-                    None,
-                    str(reference_row["part_number"] or ""),
-                    str(reference_row["part_revision"] or "-"),
-                    expected_quantity,
-                ),
+            self._upsert_forming_batch_item_row(
+                connection,
+                forming_batch_id=batch_id,
+                nest_part_id=nest_part_id,
+                part_attribute_id=None,
+                part_number=str(reference_row["part_number"] or ""),
+                part_revision=str(reference_row["part_revision"] or "-"),
+                expected_quantity=expected_quantity,
             )
 
         if mark_started and batch_status != "completed":

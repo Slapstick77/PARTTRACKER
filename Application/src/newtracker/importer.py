@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .db import APP_ROOT, get_connection
+from .db import DATA_DIR, get_connection, get_database_settings
 from .parser import (
     ParsedNestPart,
     file_sha256,
@@ -25,7 +25,7 @@ from .parser import (
 from .persistence import atomic_write_json, read_json_file
 from .schema import create_schema
 
-SCAN_CACHE_PATH = APP_ROOT / "data" / "import_scan_cache.json"
+SCAN_CACHE_PATH = DATA_DIR / "import_scan_cache.json"
 IMPORT_STABILITY_WINDOW = timedelta(minutes=2)
 MAX_IMPORT_FILE_AGE = timedelta(days=183)
 AMADA_DAT_PARSER_VERSION = "2026-04-14-job-context-v1"
@@ -49,6 +49,13 @@ WarningCallback = Callable[[dict[str, Any]], None]
 
 class SourceAccessError(RuntimeError):
     pass
+
+
+def _db_backend() -> str:
+    try:
+        return get_database_settings().backend
+    except Exception:
+        return "sqlite"
 
 
 def _empty_scan_cache() -> dict[str, Any]:
@@ -425,6 +432,39 @@ def upsert_processed_file(
     stat = _safe_stat(path)
     if stat is None:
         return
+    if _db_backend() == "sqlserver":
+        existing = connection.execute(
+            "SELECT 1 FROM processed_files WHERE file_path = ?",
+            (str(path),),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO processed_files (
+                    file_path, file_name, file_type, file_size, modified_time, content_hash, status, last_error, processed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (str(path), path.name, file_type, stat.st_size, stat.st_mtime, content_hash, status, last_error),
+            )
+            return
+
+        connection.execute(
+            """
+            UPDATE processed_files
+            SET file_name = ?,
+                file_type = ?,
+                file_size = ?,
+                modified_time = ?,
+                content_hash = ?,
+                status = ?,
+                last_error = ?,
+                processed_at = CURRENT_TIMESTAMP
+            WHERE file_path = ?
+            """,
+            (path.name, file_type, stat.st_size, stat.st_mtime, content_hash, status, last_error, str(path)),
+        )
+        return
+
     connection.execute(
         """
         INSERT INTO processed_files (
@@ -449,6 +489,169 @@ def normalize_revision(value: str | None) -> str:
     if cleaned in {"", "-"}:
         return ""
     return cleaned
+
+
+def _upsert_part_attribute_row(connection: sqlite3.Connection, row: Any) -> None:
+    params = (
+        row.com_number,
+        row.com_number or "",
+        row.part_number,
+        row.rev_level,
+        row.rev_level or "",
+        normalize_revision(row.rev_level),
+        row.build_date,
+        row.build_date or "",
+        row.quantity_per,
+        row.nested_on,
+        row.length,
+        row.width,
+        row.thickness,
+        row.item_class,
+        row.department_number,
+        row.part_parent,
+        row.ops_files,
+        row.pair_part_number,
+        row.p4_edits,
+        row.collection_cart,
+        row.routing,
+        row.model_number,
+        row.shear,
+        row.punch,
+        row.form,
+        row.requires_forming,
+        row.weight,
+        row.coded_part_msg,
+        row.parent_model_number,
+        row.skid_number,
+        row.page_number,
+        row.split_value,
+        row.source_file_path,
+    )
+    if _db_backend() != "sqlserver":
+        connection.execute(
+            """
+            INSERT INTO part_attributes (
+                com_number, com_number_key, part_number, rev_level, rev_level_key, normalized_rev_key, build_date, build_date_key,
+                quantity_per, nested_on, length, width, thickness, item_class, department_number, part_parent,
+                ops_files, pair_part_number, p4_edits, collection_cart, routing, model_number, shear, punch,
+                form, requires_forming, weight, coded_part_msg, parent_model_number, skid_number, page_number,
+                split_value, source_file_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(com_number_key, part_number, rev_level_key, build_date_key) DO UPDATE SET
+                normalized_rev_key = excluded.normalized_rev_key,
+                quantity_per = excluded.quantity_per,
+                nested_on = excluded.nested_on,
+                length = excluded.length,
+                width = excluded.width,
+                thickness = excluded.thickness,
+                item_class = excluded.item_class,
+                department_number = excluded.department_number,
+                part_parent = excluded.part_parent,
+                ops_files = excluded.ops_files,
+                pair_part_number = excluded.pair_part_number,
+                p4_edits = excluded.p4_edits,
+                collection_cart = excluded.collection_cart,
+                routing = excluded.routing,
+                model_number = excluded.model_number,
+                shear = excluded.shear,
+                punch = excluded.punch,
+                form = excluded.form,
+                requires_forming = excluded.requires_forming,
+                weight = excluded.weight,
+                coded_part_msg = excluded.coded_part_msg,
+                parent_model_number = excluded.parent_model_number,
+                skid_number = excluded.skid_number,
+                page_number = excluded.page_number,
+                split_value = excluded.split_value,
+                source_file_path = excluded.source_file_path
+            """,
+            params,
+        )
+        return
+
+    existing = connection.execute(
+        """
+        SELECT id FROM part_attributes
+        WHERE com_number_key = ? AND part_number = ? AND rev_level_key = ? AND build_date_key = ?
+        """,
+        (row.com_number or "", row.part_number, row.rev_level or "", row.build_date or ""),
+    ).fetchone()
+    if existing is None:
+        connection.execute(
+            """
+            INSERT INTO part_attributes (
+                com_number, com_number_key, part_number, rev_level, rev_level_key, normalized_rev_key, build_date, build_date_key,
+                quantity_per, nested_on, length, width, thickness, item_class, department_number, part_parent,
+                ops_files, pair_part_number, p4_edits, collection_cart, routing, model_number, shear, punch,
+                form, requires_forming, weight, coded_part_msg, parent_model_number, skid_number, page_number,
+                split_value, source_file_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            params,
+        )
+        return
+
+    connection.execute(
+        """
+        UPDATE part_attributes
+        SET normalized_rev_key = ?,
+            quantity_per = ?,
+            nested_on = ?,
+            length = ?,
+            width = ?,
+            thickness = ?,
+            item_class = ?,
+            department_number = ?,
+            part_parent = ?,
+            ops_files = ?,
+            pair_part_number = ?,
+            p4_edits = ?,
+            collection_cart = ?,
+            routing = ?,
+            model_number = ?,
+            shear = ?,
+            punch = ?,
+            form = ?,
+            requires_forming = ?,
+            weight = ?,
+            coded_part_msg = ?,
+            parent_model_number = ?,
+            skid_number = ?,
+            page_number = ?,
+            split_value = ?,
+            source_file_path = ?
+        WHERE id = ?
+        """,
+        (
+            normalize_revision(row.rev_level),
+            row.quantity_per,
+            row.nested_on,
+            row.length,
+            row.width,
+            row.thickness,
+            row.item_class,
+            row.department_number,
+            row.part_parent,
+            row.ops_files,
+            row.pair_part_number,
+            row.p4_edits,
+            row.collection_cart,
+            row.routing,
+            row.model_number,
+            row.shear,
+            row.punch,
+            row.form,
+            row.requires_forming,
+            row.weight,
+            row.coded_part_msg,
+            row.parent_model_number,
+            row.skid_number,
+            row.page_number,
+            row.split_value,
+            row.source_file_path,
+            int(existing["id"]),
+        ),
+    )
 
 def _coalesce_text_values(values: list[str]) -> str:
     unique_values: list[str] = []
@@ -725,79 +928,7 @@ def import_nest_comparison(connection: sqlite3.Connection, path: Path, roots: li
         job_folder_id = _get_or_create_job_folder(connection, folder_path, _find_source_root(folder_path, roots))
 
     for row in parse_nest_comparison_csv(path):
-        connection.execute(
-            """
-            INSERT INTO part_attributes (
-                com_number, com_number_key, part_number, rev_level, rev_level_key, normalized_rev_key, build_date, build_date_key,
-                quantity_per, nested_on, length, width, thickness, item_class, department_number, part_parent,
-                ops_files, pair_part_number, p4_edits, collection_cart, routing, model_number, shear, punch,
-                form, requires_forming, weight, coded_part_msg, parent_model_number, skid_number, page_number,
-                split_value, source_file_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(com_number_key, part_number, rev_level_key, build_date_key) DO UPDATE SET
-                normalized_rev_key = excluded.normalized_rev_key,
-                quantity_per = excluded.quantity_per,
-                nested_on = excluded.nested_on,
-                length = excluded.length,
-                width = excluded.width,
-                thickness = excluded.thickness,
-                item_class = excluded.item_class,
-                department_number = excluded.department_number,
-                part_parent = excluded.part_parent,
-                ops_files = excluded.ops_files,
-                pair_part_number = excluded.pair_part_number,
-                p4_edits = excluded.p4_edits,
-                collection_cart = excluded.collection_cart,
-                routing = excluded.routing,
-                model_number = excluded.model_number,
-                shear = excluded.shear,
-                punch = excluded.punch,
-                form = excluded.form,
-                requires_forming = excluded.requires_forming,
-                weight = excluded.weight,
-                coded_part_msg = excluded.coded_part_msg,
-                parent_model_number = excluded.parent_model_number,
-                skid_number = excluded.skid_number,
-                page_number = excluded.page_number,
-                split_value = excluded.split_value,
-                source_file_path = excluded.source_file_path
-            """,
-            (
-                row.com_number,
-                row.com_number or "",
-                row.part_number,
-                row.rev_level,
-                row.rev_level or "",
-                normalize_revision(row.rev_level),
-                row.build_date,
-                row.build_date or "",
-                row.quantity_per,
-                row.nested_on,
-                row.length,
-                row.width,
-                row.thickness,
-                row.item_class,
-                row.department_number,
-                row.part_parent,
-                row.ops_files,
-                row.pair_part_number,
-                row.p4_edits,
-                row.collection_cart,
-                row.routing,
-                row.model_number,
-                row.shear,
-                row.punch,
-                row.form,
-                row.requires_forming,
-                row.weight,
-                row.coded_part_msg,
-                row.parent_model_number,
-                row.skid_number,
-                row.page_number,
-                row.split_value,
-                row.source_file_path,
-            ),
-        )
+        _upsert_part_attribute_row(connection, row)
         if job_folder_id is not None:
             connection.execute(
                 """

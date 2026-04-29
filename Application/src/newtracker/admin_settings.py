@@ -12,15 +12,15 @@ from pathlib import Path
 from typing import Any, Mapping, cast
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from .db import APP_ROOT, get_connection
+from .db import DATA_DIR, get_connection
 from .error_reports import default_error_report_directory, resolve_error_report_directory, write_error_report
 from .importer import clear_scan_cache, import_paths, is_immutable_source_path
 from .persistence import atomic_write_json, atomic_write_text, read_json_file
 from .schema import create_schema
 from .ui_state import UiStateStore
 
-ADMIN_SETTINGS_PATH = APP_ROOT / "data" / "admin_settings.json"
-IMPORT_ERROR_LOG_PATH = APP_ROOT / "data" / "import_error.log"
+ADMIN_SETTINGS_PATH = DATA_DIR / "admin_settings.json"
+IMPORT_ERROR_LOG_PATH = DATA_DIR / "import_error.log"
 LEGACY_ADMIN_USERNAME = "admin"
 LEGACY_ADMIN_PASSWORD = "password"
 
