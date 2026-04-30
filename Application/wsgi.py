@@ -38,4 +38,8 @@ try:
 
     app = create_ui_app()
 except Exception as startup_error:
+    _trace = "".join(
+        traceback.format_exception(type(startup_error), startup_error, startup_error.__traceback__)
+    )
+    print("NEWTRACKER STARTUP ERROR:\n" + _trace, file=sys.stderr, flush=True)
     app = _build_startup_error_app(startup_error)
