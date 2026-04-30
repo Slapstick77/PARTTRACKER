@@ -1954,12 +1954,15 @@ def import_paths(
         for path in ordered_non_dat:
             emit("Importing job files", f"Checking {path.name}", str(path))
             try:
+                if hasattr(connection, "ensure_connected"):
+                    connection.ensure_connected()
                 if not should_process_file(connection, path):
                     counts["skipped"] += 1
                     counts["unchanged_skipped"] += 1
                     current_step += 1
                     continue
                 import_file(connection, path, roots)
+                connection.commit()
                 counts["processed"] += 1
             except FileNotFoundError:
                 counts["skipped"] += 1
@@ -1989,12 +1992,15 @@ def import_paths(
                 continue
             emit("Importing DAT files", f"Importing {selected_path.name}", str(selected_path))
             try:
+                if hasattr(connection, "ensure_connected"):
+                    connection.ensure_connected()
                 needs_import = should_process_file(connection, selected_path)
 
                 if needs_import:
                     imported_nest_id = import_file(connection, selected_path, roots)
                     if imported_nest_id is not None:
                         imported_nest_ids.append(imported_nest_id)
+                    connection.commit()
                     counts["processed"] += 1
                 else:
                     counts["skipped"] += 1

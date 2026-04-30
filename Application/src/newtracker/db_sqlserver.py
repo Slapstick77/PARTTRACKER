@@ -274,8 +274,25 @@ class SqlServerCursorWrapper:
 
 
 class SqlServerConnectionWrapper:
-    def __init__(self, connection: Any) -> None:
+    def __init__(self, connection: Any, *, reconnect_kwargs: dict | None = None) -> None:
         self._connection = connection
+        self._reconnect_kwargs = reconnect_kwargs or {}
+
+    def ensure_connected(self) -> None:
+        """Ping the connection and silently reconnect if Azure SQL has dropped it."""
+        if not self._reconnect_kwargs:
+            return
+        try:
+            cur = self._connection.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+        except Exception:
+            try:
+                self._connection.close()
+            except Exception:
+                pass
+            pytds = _load_pytds()
+            self._connection = pytds.connect(**self._reconnect_kwargs)
 
     def cursor(self) -> SqlServerCursorWrapper:
         return SqlServerCursorWrapper(self._connection.cursor())
@@ -329,7 +346,7 @@ def connect_sqlserver(
 ) -> SqlServerConnectionWrapper:
     pytds = _load_pytds()
     _ensure_tls_support()
-    connection = pytds.connect(
+    reconnect_kwargs = dict(
         dsn=server,
         database=database,
         user=username,
@@ -346,4 +363,5 @@ def connect_sqlserver(
         enc_login_only=False,
         pooling=False,
     )
-    return SqlServerConnectionWrapper(connection)
+    connection = pytds.connect(**reconnect_kwargs)
+    return SqlServerConnectionWrapper(connection, reconnect_kwargs=reconnect_kwargs)
