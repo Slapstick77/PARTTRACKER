@@ -819,6 +819,16 @@ def create_ui_app() -> Flask:
             flash("Import started. The monitor will update while files are being processed.", "success")
         return redirect(url_for("admin_home"))
 
+    @app.post("/admin/clear-scan-cache")
+    def admin_clear_scan_cache():
+        guard = require_admin()
+        if guard is not None:
+            return guard
+        from .importer import clear_scan_cache
+        clear_scan_cache()
+        flash("Scan cache cleared. All files will be re-evaluated on the next import.", "success")
+        return redirect(url_for("admin_home"))
+
     @app.post("/admin/clear-parsed-data")
     def admin_clear_parsed_data():
         guard = require_admin()

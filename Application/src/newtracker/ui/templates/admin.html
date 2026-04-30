@@ -295,6 +295,12 @@
               </div>
             </section>
 
+            <form method="post" action="{{ url_for('admin_clear_scan_cache') }}" class="admin-action-card" onsubmit="return confirm('This will reset the scan cache so all files are re-evaluated on the next import. DB data is NOT affected. Continue?');">
+              <h3>Clear Scan Cache</h3>
+              <p class="muted">Reset file-seen tracking so the next import re-evaluates all source files. Use this if an import crashed mid-run and files were skipped.</p>
+              <button type="submit" class="secondary">Clear Scan Cache</button>
+            </form>
+
             <form method="post" action="{{ url_for('admin_clear_parsed_data') }}" class="admin-action-card" onsubmit="return confirm('This will wipe all data from the database. Are you sure you want to continue?');">
               <h3>Clear Parsed Data</h3>
               <p class="muted">Remove parsed .DAT data, nest data, processed-file tracking, missed rows, and saved scan state so you can start fresh.</p>
