@@ -930,6 +930,10 @@ def import_dat_file(connection: sqlite3.Connection, path: Path) -> int:
 
 def import_nest_comparison(connection: sqlite3.Connection, path: Path, roots: list[Path]) -> None:
     connection.execute("DELETE FROM part_attributes WHERE source_file_path = ?", (str(path),))
+    connection.execute(
+        "UPDATE resolved_nest_parts SET matched_job_part_id = NULL WHERE matched_job_part_id IN (SELECT id FROM job_parts WHERE source_file_path = ?)",
+        (str(path),),
+    )
     connection.execute("DELETE FROM job_parts WHERE source_file_path = ?", (str(path),))
     folder_path = _job_folder_path_for_file(path, roots)
     job_folder_id: int | None = None
@@ -964,6 +968,10 @@ def import_nest_comparison(connection: sqlite3.Connection, path: Path, roots: li
 
 
 def import_yanoprog(connection: sqlite3.Connection, path: Path, roots: list[Path]) -> None:
+    connection.execute(
+        "UPDATE resolved_nest_parts SET matched_job_part_id = NULL WHERE matched_job_part_id IN (SELECT id FROM job_parts WHERE source_file_path = ?)",
+        (str(path),),
+    )
     connection.execute("DELETE FROM job_parts WHERE source_file_path = ?", (str(path),))
     folder_path = _job_folder_path_for_file(path, roots)
     if folder_path is None:
