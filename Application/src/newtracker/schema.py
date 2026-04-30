@@ -271,7 +271,7 @@ def _create_schema_sqlserver(connection: Any) -> None:
                 updated_at DATETIME2(0) NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 CONSTRAINT UQ_flat_scan_items_session_part UNIQUE (flat_scan_session_id, nest_part_id),
                 CONSTRAINT FK_flat_scan_items_sessions FOREIGN KEY (flat_scan_session_id) REFERENCES dbo.flat_scan_sessions(id) ON DELETE CASCADE,
-                CONSTRAINT FK_flat_scan_items_nest_parts FOREIGN KEY (nest_part_id) REFERENCES dbo.nest_parts(id) ON DELETE CASCADE
+                CONSTRAINT FK_flat_scan_items_nest_parts FOREIGN KEY (nest_part_id) REFERENCES dbo.nest_parts(id) ON DELETE NO ACTION
             )
         END
         """,
