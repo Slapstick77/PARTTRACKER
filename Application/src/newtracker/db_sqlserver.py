@@ -329,9 +329,18 @@ class SqlServerConnectionWrapper:
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         if exc_type is None:
-            self.commit()
+            try:
+                self.commit()
+            except Exception:
+                try:
+                    self.rollback()
+                except Exception:
+                    pass
         else:
-            self.rollback()
+            try:
+                self.rollback()
+            except Exception:
+                pass
         self.close()
 
 
