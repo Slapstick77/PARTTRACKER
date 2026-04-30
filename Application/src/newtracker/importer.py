@@ -929,6 +929,14 @@ def import_dat_file(connection: sqlite3.Connection, path: Path) -> int:
 
 
 def import_nest_comparison(connection: sqlite3.Connection, path: Path, roots: list[Path]) -> None:
+    # Read all rows from the blob mount before touching the DB.
+    # Blob NFS reads are slow; holding an idle SQL Server connection during CSV
+    # parsing causes Azure SQL to drop it. Materialize first, then write.
+    rows = list(parse_nest_comparison_csv(path))
+
+    if hasattr(connection, "ensure_connected"):
+        connection.ensure_connected()
+
     connection.execute("DELETE FROM part_attributes WHERE source_file_path = ?", (str(path),))
     connection.execute(
         "UPDATE resolved_nest_parts SET matched_job_part_id = NULL WHERE matched_job_part_id IN (SELECT id FROM job_parts WHERE source_file_path = ?)",
@@ -940,7 +948,7 @@ def import_nest_comparison(connection: sqlite3.Connection, path: Path, roots: li
     if folder_path is not None:
         job_folder_id = _get_or_create_job_folder(connection, folder_path, _find_source_root(folder_path, roots))
 
-    for row in parse_nest_comparison_csv(path):
+    for row in rows:
         _upsert_part_attribute_row(connection, row)
         if job_folder_id is not None:
             connection.execute(
@@ -968,6 +976,12 @@ def import_nest_comparison(connection: sqlite3.Connection, path: Path, roots: li
 
 
 def import_yanoprog(connection: sqlite3.Connection, path: Path, roots: list[Path]) -> None:
+    # Read all rows before DB writes for the same reason as import_nest_comparison.
+    rows = list(parse_yanoprog_csv(path))
+
+    if hasattr(connection, "ensure_connected"):
+        connection.ensure_connected()
+
     connection.execute(
         "UPDATE resolved_nest_parts SET matched_job_part_id = NULL WHERE matched_job_part_id IN (SELECT id FROM job_parts WHERE source_file_path = ?)",
         (str(path),),
@@ -977,7 +991,7 @@ def import_yanoprog(connection: sqlite3.Connection, path: Path, roots: list[Path
     if folder_path is None:
         return
     job_folder_id = _get_or_create_job_folder(connection, folder_path, _find_source_root(folder_path, roots))
-    for row in parse_yanoprog_csv(path):
+    for row in rows:
         connection.execute(
             """
             INSERT INTO job_parts (
