@@ -199,6 +199,21 @@ def create_ui_app() -> Flask:
             500,
         )
 
+    @app.errorhandler(Exception)
+    def handle_unhandled_exception(exception: Exception):
+        import sys
+        trace_text = "".join(
+            traceback.format_exception(type(exception), exception, exception.__traceback__)
+        )
+        print("NEWTRACKER UNHANDLED EXCEPTION:\n" + trace_text, file=sys.stderr, flush=True)
+        return (
+            "<h1>Unhandled application error</h1>"
+            f"<p><strong>Type:</strong> {escape(type(exception).__name__)}</p>"
+            f"<p><strong>Details:</strong> {escape(str(exception))}</p>"
+            f"<pre>{escape(trace_text)}</pre>",
+            500,
+        )
+
     @app.before_request
     def start_background_monitor() -> None:
         ensure_import_monitor_started()
