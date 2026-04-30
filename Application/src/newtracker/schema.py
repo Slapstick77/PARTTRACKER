@@ -379,7 +379,7 @@ def _create_schema_sqlserver(connection: Any) -> None:
                 created_at DATETIME2(0) NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME2(0) NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 CONSTRAINT FK_part_tracker_items_sessions FOREIGN KEY (flat_scan_session_id) REFERENCES dbo.flat_scan_sessions(id) ON DELETE SET NULL,
-                CONSTRAINT FK_part_tracker_items_nest_parts FOREIGN KEY (nest_part_id) REFERENCES dbo.nest_parts(id) ON DELETE SET NULL
+                CONSTRAINT FK_part_tracker_items_nest_parts FOREIGN KEY (nest_part_id) REFERENCES dbo.nest_parts(id) ON DELETE NO ACTION
             )
         END
         """,
