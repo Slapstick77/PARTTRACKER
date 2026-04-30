@@ -327,7 +327,18 @@ class SqlServerConnectionWrapper:
     def __enter__(self) -> SqlServerConnectionWrapper:
         return self
 
+    def _drain_pending_results(self) -> None:
+        """Drain any unread MARS result sets so commit/rollback won't raise."""
+        try:
+            cur = self._connection.cursor()
+            while cur.nextset():
+                pass
+            cur.close()
+        except Exception:
+            pass
+
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self._drain_pending_results()
         if exc_type is None:
             try:
                 self.commit()
