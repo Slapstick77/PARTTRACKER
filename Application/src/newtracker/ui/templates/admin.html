@@ -80,6 +80,34 @@
             </section>
             {% endfor %}
 
+            {% if extra_sources %}
+            <div class="pane-header" style="margin-top: 1.5rem;">
+              <div>
+                <p class="eyebrow">Extra source paths</p>
+                <h2>X15 resolution folders</h2>
+                <p class="muted">Stored for reference and future use. Not included in the regular import process.</p>
+              </div>
+            </div>
+
+            {% for source in extra_sources %}
+            <section class="folder-card">
+              <div class="folder-card-header">
+                <div>
+                  <h3>{{ source.label }}</h3>
+                  <p class="muted">{{ source.path or 'No path set' }}</p>
+                </div>
+                <span class="status-pill {% if source.exists %}scanned{% else %}missed{% endif %}">
+                  {% if source.exists %}Ready{% else %}Not set{% endif %}
+                </span>
+              </div>
+              <label class="settings-field">
+                <span>Path</span>
+                <input name="extra_path_{{ source.key }}" value="{{ source.path }}" placeholder="Enter folder path">
+              </label>
+            </section>
+            {% endfor %}
+            {% endif %}
+
             <section class="folder-card">
               <div class="folder-card-header">
                 <div>

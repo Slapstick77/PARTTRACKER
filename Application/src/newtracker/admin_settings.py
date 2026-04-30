@@ -51,6 +51,22 @@ DEFAULT_SOURCE_FOLDERS = {
     },
 }
 
+# Extra resolution paths — stored and configurable but NOT included in the regular import pipeline.
+DEFAULT_EXTRA_SOURCE_FOLDERS = {
+    "emk1_x15": {
+        "label": "EMK1 X15",
+        "path": "",
+    },
+    "laser_x15": {
+        "label": "Laser X15",
+        "path": "",
+    },
+    "amada_x15": {
+        "label": "Amada X15",
+        "path": "",
+    },
+}
+
 MAIN_SCANNER_AUTO_MODE_OFF = "off"
 MAIN_SCANNER_AUTO_MODE_AUTO_COMPLETE = "auto_complete"
 MAIN_SCANNER_AUTO_MODE_FULL_AUTO = "full_auto"
@@ -159,8 +175,9 @@ class AdminSettingsStore:
             "poll_interval_minutes": 0,
             "scanner_auto_mode": MAIN_SCANNER_AUTO_MODE_OFF,
             "debug_enabled": False,
-            "error_report_folder": str(default_error_report_directory()),
+            "error_report_folder": "",
             "folders": {key: dict(value) for key, value in DEFAULT_SOURCE_FOLDERS.items()},
+            "extra_folders": {key: dict(value) for key, value in DEFAULT_EXTRA_SOURCE_FOLDERS.items()},
             "last_import": self._default_run_result("No import has been run yet."),
             "security": self._default_security_state(),
         }
@@ -172,10 +189,13 @@ class AdminSettingsStore:
                 saved = read_json_file(self.path, self._default_state, quarantine_corrupt=True)
                 if not isinstance(saved, dict):
                     return state
-                state.update({key: value for key, value in saved.items() if key not in {"folders", "security"}})
+                state.update({key: value for key, value in saved.items() if key not in {"folders", "extra_folders", "security"}})
                 for folder_key, folder_value in saved.get("folders", {}).items():
                     if folder_key in state["folders"]:
                         state["folders"][folder_key].update(folder_value)
+                for folder_key, folder_value in saved.get("extra_folders", {}).items():
+                    if folder_key in state["extra_folders"]:
+                        state["extra_folders"][folder_key].update(folder_value)
                 security = saved.get("security", {})
                 if isinstance(security, Mapping):
                     state["security"].update(dict(security))
@@ -189,6 +209,7 @@ class AdminSettingsStore:
                 "debug_enabled": self.debug_enabled(state),
                 "error_report_folder": self.error_report_folder(state),
                 "folders": state.get("folders", {}),
+                "extra_folders": state.get("extra_folders", {}),
                 "last_import": state.get("last_import", self._default_state()["last_import"]),
                 "security": state.get("security", self._default_state()["security"]),
             }
@@ -310,6 +331,22 @@ class AdminSettingsStore:
             )
         return described
 
+    def describe_extra_sources(self, state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        current = state or self.read()
+        described: list[dict[str, Any]] = []
+        for folder_key, folder in current.get("extra_folders", {}).items():
+            path = (folder.get("path") or "").strip()
+            path_obj = Path(path) if path else None
+            described.append(
+                {
+                    "key": folder_key,
+                    "label": folder["label"],
+                    "path": path,
+                    "exists": bool(path_obj and path_obj.exists() and path_obj.is_dir()),
+                }
+            )
+        return described
+
     def get_active_paths(self, state: dict[str, Any] | None = None) -> tuple[list[Path], list[str]]:
         current = state or self.read()
         active_paths: list[Path] = []
@@ -371,6 +408,10 @@ class AdminSettingsStore:
             production_path = str(form.get(f"production_path_{folder_key}", "")).strip()
             state["folders"][folder_key]["use_production"] = mode == "production"
             state["folders"][folder_key]["production_path"] = production_path
+
+        for folder_key in state["extra_folders"]:
+            extra_path = str(form.get(f"extra_path_{folder_key}", "")).strip()
+            state["extra_folders"][folder_key]["path"] = extra_path
 
         self.write(state)
         return state

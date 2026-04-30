@@ -374,6 +374,7 @@ def create_ui_app() -> Flask:
         return {
             "settings": settings,
             "sources": admin_store.describe_sources(settings),
+            "extra_sources": admin_store.describe_extra_sources(settings),
             "debug_reports": debug_reports_context(settings),
             "last_import": admin_store.latest_import_result(settings),
             "import_monitor": admin_store.import_monitor(),

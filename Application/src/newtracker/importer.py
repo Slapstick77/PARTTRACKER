@@ -40,6 +40,13 @@ IGNORED_SOURCE_PATHS = {
     Path(r"P:\Manufacturing\CNC\Amada\OLD"),
 }
 IGNORED_SOURCE_PATH_KEYS = {str(path).casefold() for path in IGNORED_SOURCE_PATHS}
+
+# Folder names always ignored regardless of root (P: drive, /mnt/imports, etc.)
+# X15 subfolders inside EMK1/Laser/Amada are resolution-only paths, not regular imports.
+IGNORED_SUBFOLDER_NAMES = {
+    "x15",
+}
+
 IMMUTABLE_SOURCE_ROOTS = {Path(r"P:\Manufacturing\CNC")}
 IMMUTABLE_SOURCE_ROOT_KEYS = {str(path).casefold() for path in IMMUTABLE_SOURCE_ROOTS}
 
@@ -165,8 +172,10 @@ def _safe_stat(path: Path):
 def is_ignored_source_path(path: Path) -> bool:
     candidate = str(path).casefold()
     for ignored in IGNORED_SOURCE_PATH_KEYS:
-        if candidate == ignored or candidate.startswith(f"{ignored}\\"):
+        if candidate == ignored or candidate.startswith(f"{ignored}\\") or candidate.startswith(f"{ignored}/"):
             return True
+    if path.name.casefold() in IGNORED_SUBFOLDER_NAMES:
+        return True
     return False
 
 
