@@ -222,7 +222,7 @@ def _create_schema_sqlserver(connection: Any) -> None:
                 CONSTRAINT FK_resolved_nest_parts_program_nests FOREIGN KEY (nest_id) REFERENCES dbo.program_nests(id) ON DELETE CASCADE,
                 CONSTRAINT FK_resolved_nest_parts_nest_parts FOREIGN KEY (nest_part_id) REFERENCES dbo.nest_parts(id) ON DELETE NO ACTION,
                 CONSTRAINT FK_resolved_nest_parts_job_folders FOREIGN KEY (matched_job_folder_id) REFERENCES dbo.job_folders(id) ON DELETE SET NULL,
-                CONSTRAINT FK_resolved_nest_parts_job_parts FOREIGN KEY (matched_job_part_id) REFERENCES dbo.job_parts(id) ON DELETE SET NULL,
+                CONSTRAINT FK_resolved_nest_parts_job_parts FOREIGN KEY (matched_job_part_id) REFERENCES dbo.job_parts(id) ON DELETE NO ACTION,
                 CONSTRAINT FK_resolved_nest_parts_part_attributes FOREIGN KEY (matched_part_attribute_id) REFERENCES dbo.part_attributes(id) ON DELETE SET NULL
             )
         END
