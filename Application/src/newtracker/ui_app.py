@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import json
+import os
 import re
 import secrets
 import traceback
@@ -29,6 +32,61 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "ui" / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "ui" / "static"
 CHANGELOG_PATH = Path(__file__).resolve().parents[3] / "CHANGELOG.md"
 INLINE_CODE_PATTERN = re.compile(r"`([^`]+)`")
+
+TRUTHY_VALUES = {"1", "true", "yes", "on"}
+
+
+def _is_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in TRUTHY_VALUES
+
+
+def _normalize_domain_list(raw_value: str) -> set[str]:
+    values = {value.strip().lower() for value in raw_value.split(",") if value.strip()}
+    return values or {"jci.com"}
+
+
+def _decode_ms_client_principal(raw_value: str) -> dict[str, Any]:
+    padded = raw_value + "=" * (-len(raw_value) % 4)
+    decoded = base64.b64decode(padded).decode("utf-8")
+    parsed = json.loads(decoded)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _extract_easy_auth_identity() -> tuple[str, str]:
+    principal_name = str(request.headers.get("X-MS-CLIENT-PRINCIPAL-NAME") or "").strip()
+    tenant_id = ""
+
+    principal_payload = str(request.headers.get("X-MS-CLIENT-PRINCIPAL") or "").strip()
+    if principal_payload:
+        try:
+            parsed = _decode_ms_client_principal(principal_payload)
+            claims = parsed.get("claims", [])
+            if isinstance(claims, list):
+                for claim in claims:
+                    if not isinstance(claim, dict):
+                        continue
+                    claim_type = str(claim.get("typ") or "").lower()
+                    claim_value = str(claim.get("val") or "").strip()
+                    if not claim_value:
+                        continue
+                    if not principal_name and claim_type in {
+                        "preferred_username",
+                        "upn",
+                        "email",
+                        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn",
+                        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+                    }:
+                        principal_name = claim_value
+                    if not tenant_id and claim_type in {
+                        "tid",
+                        "tenantid",
+                        "http://schemas.microsoft.com/identity/claims/tenantid",
+                    }:
+                        tenant_id = claim_value
+        except Exception:
+            pass
+
+    return principal_name, tenant_id
 
 
 class SessionUiStateProxy:
@@ -213,6 +271,42 @@ def create_ui_app() -> Flask:
             f"<pre>{escape(trace_text)}</pre>",
             500,
         )
+
+    @app.before_request
+    def enforce_jci_identity() -> tuple[str, int] | None:
+        if not _is_truthy(os.getenv("NEWTRACKER_REQUIRE_JCI_AUTH")):
+            return None
+        if request.path.startswith("/.auth"):
+            return None
+        if request.endpoint == "static":
+            return None
+
+        allowed_domains = _normalize_domain_list(os.getenv("NEWTRACKER_ALLOWED_EMAIL_DOMAINS", "jci.com"))
+        allowed_tenant = str(os.getenv("NEWTRACKER_ALLOWED_TENANT_ID") or "").strip().lower()
+        principal_name, tenant_id = _extract_easy_auth_identity()
+        email = principal_name.strip().lower()
+        if not email or "@" not in email:
+            return (
+                "<h1>Sign-in required</h1>"
+                "<p>Please sign in with your JCI account to access NEWTRACKER.</p>",
+                401,
+            )
+
+        domain = email.rsplit("@", 1)[-1]
+        if domain not in allowed_domains:
+            return (
+                "<h1>Access denied</h1>"
+                f"<p>The account {escape(email)} is not in an allowed domain.</p>",
+                403,
+            )
+
+        if allowed_tenant and tenant_id.strip().lower() != allowed_tenant:
+            return (
+                "<h1>Access denied</h1>"
+                "<p>Your account is not from the allowed Azure AD tenant.</p>",
+                403,
+            )
+        g.easyauth_principal = email
 
     @app.before_request
     def start_background_monitor() -> None:

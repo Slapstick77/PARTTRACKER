@@ -70,6 +70,14 @@ Recommended App Service settings:
 - App setting `NEWTRACKER_SQLSERVER_PORT`: `1433`
 - App setting `NEWTRACKER_DATA_DIR`: `/home/site/newtracker-data`
 
+To allow only JCI accounts:
+
+- In App Service Authentication, add Microsoft as the identity provider and require authentication.
+- Restrict sign-in to your JCI Entra tenant (single tenant app registration or allowed tenant setting).
+- App setting `NEWTRACKER_REQUIRE_JCI_AUTH`: `1`
+- App setting `NEWTRACKER_ALLOWED_EMAIL_DOMAINS`: `jci.com` (comma-separated if you need more than one)
+- Optional app setting `NEWTRACKER_ALLOWED_TENANT_ID`: your JCI Entra tenant GUID
+
 After the app is deployed, initialize the database schema once and then run an import so the app has data:
 
 ```bash
