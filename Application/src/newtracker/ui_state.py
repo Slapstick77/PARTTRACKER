@@ -3079,14 +3079,27 @@ class UiStateStore:
                     mu.com_number,
                     mu.status,
                     mu.started_at,
-                    mu.last_activity_at,
-                    GROUP_CONCAT(mus.barcode_filename, '||') AS source_dats
+                    mu.last_activity_at
                 FROM monitor_units mu
-                LEFT JOIN monitor_unit_sources mus ON mus.monitor_unit_id = mu.id
-                GROUP BY mu.id, mu.com_number, mu.status, mu.started_at, mu.last_activity_at
                 ORDER BY mu.started_at DESC, mu.com_number
                 """
             ).fetchall()
+
+            source_rows = connection.execute(
+                """
+                SELECT
+                    mus.monitor_unit_id,
+                    mus.barcode_filename
+                FROM monitor_unit_sources mus
+                """
+            ).fetchall()
+            source_dats_by_unit: dict[int, list[str]] = {}
+            for source_row in source_rows:
+                unit_id = int(source_row["monitor_unit_id"])
+                dat_name = str(source_row["barcode_filename"] or "").strip()
+                if not dat_name:
+                    continue
+                source_dats_by_unit.setdefault(unit_id, []).append(dat_name)
 
             units: list[dict[str, Any]] = []
             for item in monitor_rows:
@@ -3112,8 +3125,7 @@ class UiStateStore:
                         (computed_status, int(item["id"])),
                     )
 
-                source_dats_raw = str(item["source_dats"] or "")
-                source_dats = [value for value in source_dats_raw.split("||") if value]
+                source_dats = source_dats_by_unit.get(int(item["id"]), [])
                 units.append(
                     {
                         "com_number": com_number,
