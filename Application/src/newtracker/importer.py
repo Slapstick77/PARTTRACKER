@@ -1708,6 +1708,40 @@ def _import_file_with_retry(
     return None
 
 
+def _run_with_connection_retry(
+    connection: sqlite3.Connection,
+    *,
+    emit: Callable[[str, str, str], None],
+    phase: str,
+    action: str,
+    current_file: str,
+    work: Callable[[], Any],
+) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_FILE_IMPORT_ATTEMPTS + 1):
+        try:
+            if hasattr(connection, "ensure_connected"):
+                connection.ensure_connected()
+            return work()
+        except Exception as exc:
+            last_error = exc
+            if not _is_transient_connection_error(exc) or attempt >= MAX_FILE_IMPORT_ATTEMPTS:
+                raise
+            emit(
+                phase,
+                f"Connection dropped while {action}; retrying ({attempt + 1}/{MAX_FILE_IMPORT_ATTEMPTS})",
+                current_file,
+            )
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Connection retry failed without an exception.")
+
+
 def resolve_nest_parts_for_ids(connection: sqlite3.Connection, nest_ids: list[int]) -> None:
     unique_nest_ids = sorted({int(nest_id) for nest_id in nest_ids if int(nest_id) > 0})
     if not unique_nest_ids:
@@ -2042,7 +2076,14 @@ def import_paths(
             current_step += 1
 
         for barcode_filename, candidates in sorted(grouped_dat_files.items()):
-            current_source = _current_program_source(connection, barcode_filename)
+            current_source = _run_with_connection_retry(
+                connection,
+                emit=emit,
+                phase="Importing DAT files",
+                action=f"checking existing source for {barcode_filename}",
+                current_file=barcode_filename,
+                work=lambda: _current_program_source(connection, barcode_filename),
+            )
             if current_source is not None:
                 emit("Importing DAT files", f"Skipping {barcode_filename} (already imported)", current_source)
                 counts["skipped"] += 1
@@ -2054,7 +2095,14 @@ def import_paths(
                 continue
 
             try:
-                selected_path, _reason = _select_best_dat_candidate(connection, candidates)
+                selected_path, _reason = _run_with_connection_retry(
+                    connection,
+                    emit=emit,
+                    phase="Importing DAT files",
+                    action=f"selecting best DAT candidate for {barcode_filename}",
+                    current_file=barcode_filename,
+                    work=lambda: _select_best_dat_candidate(connection, candidates),
+                )
             except FileNotFoundError:
                 counts["skipped"] += len(candidates)
                 counts["missing_skipped"] += len(candidates)
@@ -2063,9 +2111,14 @@ def import_paths(
                 continue
             emit("Importing DAT files", f"Importing {selected_path.name}", str(selected_path))
             try:
-                if hasattr(connection, "ensure_connected"):
-                    connection.ensure_connected()
-                needs_import = should_process_file(connection, selected_path)
+                needs_import = _run_with_connection_retry(
+                    connection,
+                    emit=emit,
+                    phase="Importing DAT files",
+                    action=f"checking whether {selected_path.name} needs import",
+                    current_file=str(selected_path),
+                    work=lambda: should_process_file(connection, selected_path),
+                )
 
                 if needs_import:
                     imported_nest_id = _import_file_with_retry(connection, selected_path, roots, emit=emit)
