@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import os
 import sqlite3
 from pathlib import Path
-import time
 from typing import Any
 
 from .db_sqlite import connect_sqlite
@@ -20,8 +19,6 @@ SQLSERVER_USERNAME_ENV_VAR = "NEWTRACKER_SQLSERVER_USERNAME"
 SQLSERVER_PASSWORD_ENV_VAR = "NEWTRACKER_SQLSERVER_PASSWORD"
 SQLSERVER_PORT_ENV_VAR = "NEWTRACKER_SQLSERVER_PORT"
 SQLSERVER_CA_PATH_ENV_VAR = "NEWTRACKER_SQLSERVER_CA_PATH"
-SQLSERVER_CONNECT_RETRIES_ENV_VAR = "NEWTRACKER_SQLSERVER_CONNECT_RETRIES"
-SQLSERVER_RETRY_DELAY_SECONDS_ENV_VAR = "NEWTRACKER_SQLSERVER_RETRY_DELAY_SECONDS"
 SUPPORTED_DB_BACKENDS = {"sqlite", "sqlserver"}
 
 
@@ -133,58 +130,30 @@ DATA_DIR = resolve_data_dir()
 DB_PATH = _resolve_sqlite_path()
 
 
-def _read_sqlserver_connect_retries() -> int:
-    raw_value = os.getenv(SQLSERVER_CONNECT_RETRIES_ENV_VAR, "3").strip()
-    try:
-        parsed = int(raw_value)
-    except ValueError:
-        return 3
-    return max(1, parsed)
-
-
-def _read_sqlserver_retry_delay_seconds() -> float:
-    raw_value = os.getenv(SQLSERVER_RETRY_DELAY_SECONDS_ENV_VAR, "2").strip()
-    try:
-        parsed = float(raw_value)
-    except ValueError:
-        return 2.0
-    return max(0.0, parsed)
-
-
 def get_connection() -> Any:
     settings = get_database_settings()
     if settings.backend == "sqlite" and settings.sqlite_path is not None:
         return connect_sqlite(settings.sqlite_path)
 
     if settings.backend == "sqlserver":
-        attempts = _read_sqlserver_connect_retries()
-        delay_seconds = _read_sqlserver_retry_delay_seconds()
-        last_exception: Exception | None = None
-
-        for attempt in range(1, attempts + 1):
-            try:
-                return connect_sqlserver(
-                    server=settings.sqlserver_server,
-                    database=settings.sqlserver_database,
-                    username=settings.sqlserver_username,
-                    password=settings.sqlserver_password,
-                    port=settings.sqlserver_port,
-                    cafile=settings.sqlserver_ca_path or None,
-                )
-            except SqlServerDriverMissingError as exc:
-                raise DatabaseConfigurationError(str(exc)) from exc
-            except Exception as exc:
-                last_exception = exc
-                if attempt < attempts and delay_seconds > 0:
-                    time.sleep(delay_seconds)
-
-        exc = last_exception if last_exception is not None else RuntimeError("SQL Server connection attempt failed.")
-        detail = str(exc).strip()
-        suffix = f" Original error: {detail}" if detail else ""
-        raise DatabaseConfigurationError(
-            "Unable to connect to SQL Server with the configured NEWTRACKER_SQLSERVER_* settings. "
-            "Check the server name, database name, username, password, and Azure SQL firewall access."
-            f"{suffix}"
-        ) from exc
+        try:
+            return connect_sqlserver(
+                server=settings.sqlserver_server,
+                database=settings.sqlserver_database,
+                username=settings.sqlserver_username,
+                password=settings.sqlserver_password,
+                port=settings.sqlserver_port,
+                cafile=settings.sqlserver_ca_path or None,
+            )
+        except SqlServerDriverMissingError as exc:
+            raise DatabaseConfigurationError(str(exc)) from exc
+        except Exception as exc:
+            detail = str(exc).strip()
+            suffix = f" Original error: {detail}" if detail else ""
+            raise DatabaseConfigurationError(
+                "Unable to connect to SQL Server with the configured NEWTRACKER_SQLSERVER_* settings. "
+                "Check the server name, database name, username, password, and Azure SQL firewall access."
+                f"{suffix}"
+            ) from exc
 
     raise DatabaseConfigurationError(f"Unsupported database backend '{settings.backend}'.")
