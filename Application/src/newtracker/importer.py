@@ -2148,8 +2148,17 @@ def import_paths(
             current_step += 1
 
         if imported_nest_ids:
-            emit("Resolving parts", f"Resolving {len(imported_nest_ids)} newly imported nests")
-            resolve_nest_parts_for_ids(connection, imported_nest_ids)
+            unique_nest_ids = sorted(set(imported_nest_ids))
+            total_to_resolve = len(unique_nest_ids)
+            chunk_size = max(1, batch_commit_every)
+            for chunk_start in range(0, total_to_resolve, chunk_size):
+                chunk = unique_nest_ids[chunk_start : chunk_start + chunk_size]
+                emit(
+                    "Resolving parts",
+                    f"Resolving nests {chunk_start + 1}–{min(chunk_start + chunk_size, total_to_resolve)} of {total_to_resolve}",
+                )
+                resolve_nest_parts_for_ids(connection, chunk)
+                connection.commit()
         else:
             emit("Resolving parts", "No new DAT files imported; skipping resolved part rebuild")
         current_step += 1
