@@ -188,9 +188,10 @@ def is_immutable_source_path(path: Path) -> bool:
 
 
 def should_trust_directory_cache(path: Path, *, recursive: bool, is_root: bool) -> bool:
-    if is_root and not recursive and is_immutable_source_path(path):
-        return False
-    return True
+    # Blob/NFS mounted sources can report directory metadata in ways that make
+    # mtime-based cache trust unreliable. Always rescan the directory tree so
+    # imports reflect the actual files currently present.
+    return False
 
 
 def _normalize_cached_node(node: Mapping[str, Any] | None) -> dict[str, Any] | None:
