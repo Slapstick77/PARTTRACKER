@@ -2147,12 +2147,25 @@ def import_paths(
                     counts["duplicate_candidate_skipped"] += 1
             current_step += 1
 
-        if imported_nest_ids:
-            unique_nest_ids = sorted(set(imported_nest_ids))
-            total_to_resolve = len(unique_nest_ids)
+        # Also find nests that were imported in a previous run but never resolved
+        # (e.g. because the resolve step crashed before completing).
+        unresolved_rows = connection.execute(
+            """
+            SELECT pn.id FROM program_nests pn
+            WHERE NOT EXISTS (
+                SELECT 1 FROM resolved_nest_parts rp WHERE rp.nest_id = pn.id
+            )
+            """
+        ).fetchall()
+        previously_unresolved = [int(row[0]) for row in unresolved_rows]
+
+        all_nest_ids_to_resolve = sorted(set(imported_nest_ids) | set(previously_unresolved))
+
+        if all_nest_ids_to_resolve:
+            total_to_resolve = len(all_nest_ids_to_resolve)
             chunk_size = max(1, batch_commit_every)
             for chunk_start in range(0, total_to_resolve, chunk_size):
-                chunk = unique_nest_ids[chunk_start : chunk_start + chunk_size]
+                chunk = all_nest_ids_to_resolve[chunk_start : chunk_start + chunk_size]
                 emit(
                     "Resolving parts",
                     f"Resolving nests {chunk_start + 1}–{min(chunk_start + chunk_size, total_to_resolve)} of {total_to_resolve}",
@@ -2160,7 +2173,7 @@ def import_paths(
                 resolve_nest_parts_for_ids(connection, chunk)
                 connection.commit()
         else:
-            emit("Resolving parts", "No new DAT files imported; skipping resolved part rebuild")
+            emit("Resolving parts", "All nests already resolved; skipping")
         current_step += 1
 
         connection.commit()
