@@ -383,7 +383,9 @@ def _is_recent_enough_stat(stat: os.stat_result, *, now: datetime | None = None)
 
 
 def should_scan_recursively(root: Path) -> bool:
-    return "programming" in root.name.casefold()
+    # Import sources can contain supported files in nested job folders,
+    # so always recurse and rely on explicit ignore rules for excluded trees.
+    return True
 
 
 def file_content_fingerprint(path: Path, file_type: str | None = None) -> str:
