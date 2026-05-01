@@ -1975,12 +1975,16 @@ def _scan_supported_files(
     return sorted(discovered, key=lambda item: str(item[0]).casefold()), unstable_recent_files, filtered_old_files
 
 
+IMPORT_BATCH_COMMIT_SIZE = 50
+
+
 def import_paths(
     roots: list[Path],
     *,
     changed_since: datetime | None = None,
     progress_callback: ProgressCallback | None = None,
     warning_callback: WarningCallback | None = None,
+    batch_commit_every: int = IMPORT_BATCH_COMMIT_SIZE,
 ) -> dict[str, int]:
     with get_connection() as connection:
         create_schema(connection)
@@ -2069,6 +2073,8 @@ def import_paths(
                     continue
                 _import_file_with_retry(connection, path, roots, emit=emit)
                 counts["processed"] += 1
+                if batch_commit_every > 0 and counts["processed"] % batch_commit_every == 0:
+                    connection.commit()
             except FileNotFoundError:
                 counts["skipped"] += 1
                 counts["missing_skipped"] += 1
@@ -2125,6 +2131,8 @@ def import_paths(
                     if imported_nest_id is not None:
                         imported_nest_ids.append(imported_nest_id)
                     counts["processed"] += 1
+                    if batch_commit_every > 0 and counts["processed"] % batch_commit_every == 0:
+                        connection.commit()
                 else:
                     counts["skipped"] += 1
                     counts["unchanged_skipped"] += 1
