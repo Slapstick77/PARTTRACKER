@@ -1669,6 +1669,45 @@ def rebuild_resolved_nest_parts(connection: sqlite3.Connection) -> None:
             )
 
 
+def _is_transient_connection_error(exc: Exception) -> bool:
+    error_text = f"{type(exc).__name__}: {exc}".casefold()
+    return any(marker in error_text for marker in TRANSIENT_CONNECTION_ERROR_MARKERS)
+
+
+def _import_file_with_retry(
+    connection: sqlite3.Connection,
+    path: Path,
+    roots: list[Path],
+    *,
+    emit: Callable[[str, str, str], None],
+) -> int | None:
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_FILE_IMPORT_ATTEMPTS + 1):
+        try:
+            if hasattr(connection, "ensure_connected"):
+                connection.ensure_connected()
+            imported_nest_id = import_file(connection, path, roots)
+            connection.commit()
+            return imported_nest_id
+        except Exception as exc:
+            last_error = exc
+            if not _is_transient_connection_error(exc) or attempt >= MAX_FILE_IMPORT_ATTEMPTS:
+                raise
+            emit(
+                "Importing job files",
+                f"Connection dropped while importing {path.name}; retrying ({attempt + 1}/{MAX_FILE_IMPORT_ATTEMPTS})",
+                str(path),
+            )
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+
+    if last_error is not None:
+        raise last_error
+    return None
+
+
 def resolve_nest_parts_for_ids(connection: sqlite3.Connection, nest_ids: list[int]) -> None:
     unique_nest_ids = sorted({int(nest_id) for nest_id in nest_ids if int(nest_id) > 0})
     if not unique_nest_ids:
@@ -1680,44 +1719,6 @@ def resolve_nest_parts_for_ids(connection: sqlite3.Connection, nest_ids: list[in
         unique_nest_ids,
     )
 
-
-    def _is_transient_connection_error(exc: Exception) -> bool:
-        error_text = f"{type(exc).__name__}: {exc}".casefold()
-        return any(marker in error_text for marker in TRANSIENT_CONNECTION_ERROR_MARKERS)
-
-
-    def _import_file_with_retry(
-        connection: sqlite3.Connection,
-        path: Path,
-        roots: list[Path],
-        *,
-        emit: Callable[[str, str, str], None],
-    ) -> int | None:
-        last_error: Exception | None = None
-        for attempt in range(1, MAX_FILE_IMPORT_ATTEMPTS + 1):
-            try:
-                if hasattr(connection, "ensure_connected"):
-                    connection.ensure_connected()
-                imported_nest_id = import_file(connection, path, roots)
-                connection.commit()
-                return imported_nest_id
-            except Exception as exc:
-                last_error = exc
-                if not _is_transient_connection_error(exc) or attempt >= MAX_FILE_IMPORT_ATTEMPTS:
-                    raise
-                emit(
-                    "Importing job files",
-                    f"Connection dropped while importing {path.name}; retrying ({attempt + 1}/{MAX_FILE_IMPORT_ATTEMPTS})",
-                    str(path),
-                )
-                try:
-                    connection.rollback()
-                except Exception:
-                    pass
-
-        if last_error is not None:
-            raise last_error
-        return None
     resolution_cache = _build_resolution_cache(connection)
     nest_rows = connection.execute(
         f"""
