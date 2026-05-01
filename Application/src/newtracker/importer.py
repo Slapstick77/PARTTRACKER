@@ -56,6 +56,15 @@ IMMUTABLE_SOURCE_ROOT_KEYS = {str(path).casefold() for path in IMMUTABLE_SOURCE_
 ProgressCallback = Callable[[dict[str, Any]], None]
 WarningCallback = Callable[[dict[str, Any]], None]
 
+TRANSIENT_CONNECTION_ERROR_MARKERS = (
+    "server closed connection",
+    "closedconnectionerror",
+    "connection reset",
+    "transport-level error",
+    "connection is closed",
+)
+MAX_FILE_IMPORT_ATTEMPTS = 2
+
 
 class SourceAccessError(RuntimeError):
     pass
@@ -1134,14 +1143,19 @@ def import_file(connection: sqlite3.Connection, path: Path, roots: list[Path]) -
             import_channel_rollformer(connection, path, roots)
         upsert_processed_file(connection, path=path, file_type=file_type, status="processed", content_hash=content_hash)
     except Exception as exc:
-        upsert_processed_file(
-            connection,
-            path=path,
-            file_type=file_type,
-            status="error",
-            content_hash=content_hash,
-            last_error=str(exc),
-        )
+        try:
+            upsert_processed_file(
+                connection,
+                path=path,
+                file_type=file_type,
+                status="error",
+                content_hash=content_hash,
+                last_error=str(exc),
+            )
+        except Exception:
+            # If the SQL connection dropped, keep the original import failure
+            # and let the caller reconnect/retry at the file level.
+            pass
         raise
 
     return imported_nest_id
@@ -1665,6 +1679,45 @@ def resolve_nest_parts_for_ids(connection: sqlite3.Connection, nest_ids: list[in
         f"DELETE FROM resolved_nest_parts WHERE nest_id IN ({placeholders})",
         unique_nest_ids,
     )
+
+
+    def _is_transient_connection_error(exc: Exception) -> bool:
+        error_text = f"{type(exc).__name__}: {exc}".casefold()
+        return any(marker in error_text for marker in TRANSIENT_CONNECTION_ERROR_MARKERS)
+
+
+    def _import_file_with_retry(
+        connection: sqlite3.Connection,
+        path: Path,
+        roots: list[Path],
+        *,
+        emit: Callable[[str, str, str], None],
+    ) -> int | None:
+        last_error: Exception | None = None
+        for attempt in range(1, MAX_FILE_IMPORT_ATTEMPTS + 1):
+            try:
+                if hasattr(connection, "ensure_connected"):
+                    connection.ensure_connected()
+                imported_nest_id = import_file(connection, path, roots)
+                connection.commit()
+                return imported_nest_id
+            except Exception as exc:
+                last_error = exc
+                if not _is_transient_connection_error(exc) or attempt >= MAX_FILE_IMPORT_ATTEMPTS:
+                    raise
+                emit(
+                    "Importing job files",
+                    f"Connection dropped while importing {path.name}; retrying ({attempt + 1}/{MAX_FILE_IMPORT_ATTEMPTS})",
+                    str(path),
+                )
+                try:
+                    connection.rollback()
+                except Exception:
+                    pass
+
+        if last_error is not None:
+            raise last_error
+        return None
     resolution_cache = _build_resolution_cache(connection)
     nest_rows = connection.execute(
         f"""
@@ -1974,15 +2027,12 @@ def import_paths(
         for path in ordered_non_dat:
             emit("Importing job files", f"Checking {path.name}", str(path))
             try:
-                if hasattr(connection, "ensure_connected"):
-                    connection.ensure_connected()
                 if not should_process_file(connection, path):
                     counts["skipped"] += 1
                     counts["unchanged_skipped"] += 1
                     current_step += 1
                     continue
-                import_file(connection, path, roots)
-                connection.commit()
+                _import_file_with_retry(connection, path, roots, emit=emit)
                 counts["processed"] += 1
             except FileNotFoundError:
                 counts["skipped"] += 1
@@ -2017,10 +2067,9 @@ def import_paths(
                 needs_import = should_process_file(connection, selected_path)
 
                 if needs_import:
-                    imported_nest_id = import_file(connection, selected_path, roots)
+                    imported_nest_id = _import_file_with_retry(connection, selected_path, roots, emit=emit)
                     if imported_nest_id is not None:
                         imported_nest_ids.append(imported_nest_id)
-                    connection.commit()
                     counts["processed"] += 1
                 else:
                     counts["skipped"] += 1
