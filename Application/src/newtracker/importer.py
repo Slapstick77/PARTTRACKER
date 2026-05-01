@@ -47,7 +47,10 @@ IGNORED_SUBFOLDER_NAMES = {
     "x15",
 }
 
-IMMUTABLE_SOURCE_ROOTS = {Path(r"P:\Manufacturing\CNC")}
+IMMUTABLE_SOURCE_ROOTS = {
+    Path(r"P:\Manufacturing\CNC"),
+    Path("/mnt/imports"),
+}
 IMMUTABLE_SOURCE_ROOT_KEYS = {str(path).casefold() for path in IMMUTABLE_SOURCE_ROOTS}
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -182,7 +185,7 @@ def is_ignored_source_path(path: Path) -> bool:
 def is_immutable_source_path(path: Path) -> bool:
     candidate = str(path).casefold()
     for root in IMMUTABLE_SOURCE_ROOT_KEYS:
-        if candidate == root or candidate.startswith(f"{root}\\"):
+        if candidate == root or candidate.startswith(f"{root}\\") or candidate.startswith(f"{root}/"):
             return True
     return False
 
