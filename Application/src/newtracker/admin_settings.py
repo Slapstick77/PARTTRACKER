@@ -309,6 +309,15 @@ class AdminSettingsStore:
         self.write(state)
         return state
 
+    @staticmethod
+    def _path_is_dir_safe(path_obj: Path | None) -> bool:
+        if path_obj is None:
+            return False
+        try:
+            return path_obj.is_dir()
+        except OSError:
+            return False
+
     def describe_sources(self, state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         current = state or self.read()
         described: list[dict[str, Any]] = []
@@ -326,7 +335,7 @@ class AdminSettingsStore:
                     "use_production": use_production,
                     "selected_mode": "production" if use_production else "test",
                     "selected_path": selected_path,
-                    "exists": bool(selected_path_obj and selected_path_obj.exists() and selected_path_obj.is_dir()),
+                    "exists": self._path_is_dir_safe(selected_path_obj),
                 }
             )
         return described
@@ -342,7 +351,7 @@ class AdminSettingsStore:
                     "key": folder_key,
                     "label": folder["label"],
                     "path": path,
-                    "exists": bool(path_obj and path_obj.exists() and path_obj.is_dir()),
+                    "exists": self._path_is_dir_safe(path_obj),
                 }
             )
         return described
@@ -366,7 +375,7 @@ class AdminSettingsStore:
                 continue
             seen.add(normalized)
 
-            if path.exists() and path.is_dir():
+            if self._path_is_dir_safe(path):
                 active_paths.append(path)
             else:
                 missing_paths.append(f"{folder['label']}: {selected_path}")
