@@ -112,18 +112,64 @@
               <div class="folder-card-header">
                 <div>
                   <h3>Automatic import</h3>
-                  <p class="muted">Automatic imports use the same unified import process as the manual run.</p>
+                  <p class="muted">Automatic imports and webhook triggers use the same unified import process as the manual run.</p>
                   <p class="muted">That means new job files in Programming folders are included, not just .DAT files.</p>
                   <p class="muted">Amada, EMK1, and Laser scan only the selected folder. Programming folders still scan subfolders.</p>
                   <p class="muted">Files older than 6 months are skipped, and files changed within the last 2 minutes are deferred until they are stable enough to import safely.</p>
                 </div>
               </div>
 
+              <div class="toggle-row three-way-toggle">
+                <label class="toggle-option">
+                  <input type="radio" name="import_trigger_mode" value="off" {% if settings.import_trigger_mode == 'off' %}checked{% endif %}>
+                  <span>
+                    <strong>Off</strong>
+                    <small>No automatic import. Only the manual button can start processing.</small>
+                  </span>
+                </label>
+                <label class="toggle-option">
+                  <input type="radio" name="import_trigger_mode" value="interval" {% if settings.import_trigger_mode == 'interval' %}checked{% endif %}>
+                  <span>
+                    <strong>Interval</strong>
+                    <small>Run automatic checks every few minutes using the interval below.</small>
+                  </span>
+                </label>
+                <label class="toggle-option">
+                  <input type="radio" name="import_trigger_mode" value="webhook" {% if settings.import_trigger_mode == 'webhook' %}checked{% endif %}>
+                  <span>
+                    <strong>Webhook Trigger</strong>
+                    <small>Wait for your Azure Logic App to call the trigger endpoint.</small>
+                  </span>
+                </label>
+              </div>
+
               <label class="settings-field short-field">
                 <span>Minutes between checks</span>
                 <input name="poll_interval_minutes" type="number" min="0" step="1" value="{{ settings.poll_interval_minutes }}">
               </label>
-              <p class="muted helper-text">Use 0 to disable scheduled automatic imports.</p>
+              <p class="muted helper-text">This value is only used when Interval mode is selected. Interval mode requires 1 or more minutes.</p>
+
+              <div class="source-summary-block">
+                <h4>Webhook trigger</h4>
+                <label class="settings-field readonly-field">
+                  <span>POST endpoint</span>
+                  <input value="{{ webhook_trigger_endpoint }}" readonly>
+                </label>
+                <label class="settings-field readonly-field">
+                  <span>Trigger token</span>
+                  <input value="{{ webhook_trigger_token }}" readonly>
+                </label>
+                <p class="muted helper-text">Preferred auth header: <strong>X-NEWTRACKER-TRIGGER-TOKEN</strong>. The endpoint also accepts <strong>Authorization: Bearer &lt;token&gt;</strong> or <strong>?token=...</strong>.</p>
+                <p class="muted helper-text">When Webhook Trigger mode is selected, your Logic App can POST this endpoint and NEWTRACKER will start the same import as Look For New Files.</p>
+                <div class="status-grid">
+                  <div><span>Last request</span><strong>{{ last_webhook_event.status or 'never' }}</strong></div>
+                  <div><span>Received</span><strong>{{ last_webhook_event.received_at or 'Never' }}</strong></div>
+                </div>
+                <p class="muted">{{ last_webhook_event.message }}</p>
+                {% if last_webhook_event.remote_addr %}
+                <p class="muted">Last caller: {{ last_webhook_event.remote_addr }}</p>
+                {% endif %}
+              </div>
             </section>
 
             <section class="folder-card">

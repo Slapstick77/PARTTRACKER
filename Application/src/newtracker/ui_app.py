@@ -17,6 +17,7 @@ from werkzeug.exceptions import HTTPException
 from .admin_settings import (
     AdminSettingsError,
     AdminSettingsStore,
+    IMPORT_TRIGGER_MODE_WEBHOOK,
     MAIN_SCANNER_AUTO_MODE_AUTO_COMPLETE,
     MAIN_SCANNER_AUTO_MODE_FULL_AUTO,
     MAIN_SCANNER_AUTO_MODE_OFF,
@@ -201,6 +202,21 @@ def create_ui_app() -> Flask:
             "recent_reports": list_error_reports(report_directory),
         }
 
+    def request_trigger_remote_addr() -> str:
+        forwarded_for = str(request.headers.get("X-Forwarded-For") or "").strip()
+        if forwarded_for:
+            return forwarded_for.split(",", 1)[0].strip()
+        return str(request.remote_addr or "").strip()
+
+    def provided_trigger_token() -> str:
+        header_token = str(request.headers.get("X-NEWTRACKER-TRIGGER-TOKEN") or "").strip()
+        if header_token:
+            return header_token
+        authorization = str(request.headers.get("Authorization") or "").strip()
+        if authorization.lower().startswith("bearer "):
+            return authorization[7:].strip()
+        return str(request.args.get("token") or "").strip()
+
     def save_debug_report(
         *,
         category: str,
@@ -277,6 +293,8 @@ def create_ui_app() -> Flask:
         if not _is_truthy(os.getenv("NEWTRACKER_REQUIRE_JCI_AUTH")):
             return None
         if request.path.startswith("/.auth"):
+            return None
+        if request.endpoint == "api_process_ping":
             return None
         if request.endpoint == "static":
             return None
@@ -378,6 +396,9 @@ def create_ui_app() -> Flask:
             "debug_reports": debug_reports_context(settings),
             "last_import": admin_store.latest_import_result(settings),
             "import_monitor": admin_store.import_monitor(),
+            "webhook_trigger_endpoint": url_for("api_process_ping", _external=True),
+            "webhook_trigger_token": admin_store.webhook_trigger_token(settings),
+            "last_webhook_event": admin_store.last_webhook_event(settings),
             "admin_username": admin_store.admin_username(settings),
             "security": settings.get("security", {}),
         }
@@ -818,6 +839,53 @@ def create_ui_app() -> Flask:
         else:
             flash("Import started. The monitor will update while files are being processed.", "success")
         return redirect(url_for("admin_home"))
+
+    @app.post("/api/process/ping")
+    def api_process_ping():
+        settings = admin_store.read()
+        remote_addr = request_trigger_remote_addr()
+        user_agent = request.user_agent.string
+        if admin_store.import_trigger_mode(settings) != IMPORT_TRIGGER_MODE_WEBHOOK:
+            message = "External import trigger is disabled unless Automatic import mode is set to Webhook Trigger."
+            admin_store.record_webhook_event(
+                status="disabled",
+                message=message,
+                remote_addr=remote_addr,
+                user_agent=user_agent,
+            )
+            return {"status": "disabled", "message": message}, 409
+
+        expected_token = admin_store.webhook_trigger_token(settings)
+        supplied_token = provided_trigger_token()
+        if not supplied_token or supplied_token != expected_token:
+            message = "Trigger token was missing or invalid."
+            admin_store.record_webhook_event(
+                status="unauthorized",
+                message=message,
+                remote_addr=remote_addr,
+                user_agent=user_agent,
+            )
+            return {"status": "unauthorized", "message": message}, 401
+
+        started = start_import_job(admin_store, trigger="webhook")
+        if not started:
+            message = "An import is already running."
+            admin_store.record_webhook_event(
+                status="busy",
+                message=message,
+                remote_addr=remote_addr,
+                user_agent=user_agent,
+            )
+            return {"status": "busy", "message": message}, 200
+
+        message = "Import started."
+        admin_store.record_webhook_event(
+            status="accepted",
+            message=message,
+            remote_addr=remote_addr,
+            user_agent=user_agent,
+        )
+        return {"status": "accepted", "message": message}, 202
 
     @app.post("/admin/clear-scan-cache")
     def admin_clear_scan_cache():

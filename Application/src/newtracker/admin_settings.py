@@ -76,6 +76,15 @@ VALID_MAIN_SCANNER_AUTO_MODES = {
     MAIN_SCANNER_AUTO_MODE_FULL_AUTO,
 }
 
+IMPORT_TRIGGER_MODE_OFF = "off"
+IMPORT_TRIGGER_MODE_INTERVAL = "interval"
+IMPORT_TRIGGER_MODE_WEBHOOK = "webhook"
+VALID_IMPORT_TRIGGER_MODES = {
+    IMPORT_TRIGGER_MODE_OFF,
+    IMPORT_TRIGGER_MODE_INTERVAL,
+    IMPORT_TRIGGER_MODE_WEBHOOK,
+}
+
 _SETTINGS_LOCK = threading.RLock()
 _IMPORT_LOCK = threading.Lock()
 _MONITOR_LOCK = threading.Lock()
@@ -160,6 +169,16 @@ class AdminSettingsStore:
         }
 
     @staticmethod
+    def _default_webhook_event() -> dict[str, Any]:
+        return {
+            "status": "never",
+            "message": "No external trigger has been received yet.",
+            "received_at": "",
+            "remote_addr": "",
+            "user_agent": "",
+        }
+
+    @staticmethod
     def _default_security_state() -> dict[str, Any]:
         configured_username = os.getenv("NEWTRACKER_ADMIN_USERNAME", "").strip() or LEGACY_ADMIN_USERNAME
         configured_password = os.getenv("NEWTRACKER_ADMIN_PASSWORD", "").strip() or LEGACY_ADMIN_PASSWORD
@@ -173,6 +192,9 @@ class AdminSettingsStore:
     def _default_state(self) -> dict[str, Any]:
         return {
             "poll_interval_minutes": 0,
+            "import_trigger_mode": IMPORT_TRIGGER_MODE_OFF,
+            "webhook_trigger_token": secrets.token_urlsafe(32),
+            "last_webhook_event": self._default_webhook_event(),
             "scanner_auto_mode": MAIN_SCANNER_AUTO_MODE_OFF,
             "debug_enabled": False,
             "error_report_folder": "",
@@ -199,12 +221,29 @@ class AdminSettingsStore:
                 security = saved.get("security", {})
                 if isinstance(security, Mapping):
                     state["security"].update(dict(security))
+            raw_mode = str(state.get("import_trigger_mode") or "").strip().lower()
+            if raw_mode not in VALID_IMPORT_TRIGGER_MODES:
+                state["import_trigger_mode"] = (
+                    IMPORT_TRIGGER_MODE_INTERVAL if int(state.get("poll_interval_minutes") or 0) > 0 else IMPORT_TRIGGER_MODE_OFF
+                )
+            if not str(state.get("webhook_trigger_token") or "").strip():
+                state["webhook_trigger_token"] = secrets.token_urlsafe(32)
+            webhook_event = state.get("last_webhook_event")
+            if not isinstance(webhook_event, Mapping):
+                state["last_webhook_event"] = self._default_webhook_event()
+            else:
+                merged_event = self._default_webhook_event()
+                merged_event.update({key: value for key, value in webhook_event.items()})
+                state["last_webhook_event"] = merged_event
             return state
 
     def write(self, state: dict[str, Any]) -> None:
         with _SETTINGS_LOCK:
             persisted = {
                 "poll_interval_minutes": state.get("poll_interval_minutes", 0),
+                "import_trigger_mode": self.import_trigger_mode(state),
+                "webhook_trigger_token": self.webhook_trigger_token(state),
+                "last_webhook_event": state.get("last_webhook_event", self._default_webhook_event()),
                 "scanner_auto_mode": self.scanner_auto_mode(state),
                 "debug_enabled": self.debug_enabled(state),
                 "error_report_folder": self.error_report_folder(state),
@@ -221,6 +260,45 @@ class AdminSettingsStore:
         if raw not in VALID_MAIN_SCANNER_AUTO_MODES:
             return MAIN_SCANNER_AUTO_MODE_OFF
         return raw
+
+    def import_trigger_mode(self, state: dict[str, Any] | None = None) -> str:
+        current = state or self.read()
+        raw = str(current.get("import_trigger_mode") or IMPORT_TRIGGER_MODE_OFF).strip().lower()
+        if raw not in VALID_IMPORT_TRIGGER_MODES:
+            return IMPORT_TRIGGER_MODE_INTERVAL if int(current.get("poll_interval_minutes") or 0) > 0 else IMPORT_TRIGGER_MODE_OFF
+        return raw
+
+    def webhook_trigger_token(self, state: dict[str, Any] | None = None) -> str:
+        current = state or self.read()
+        token = str(current.get("webhook_trigger_token") or "").strip()
+        return token or secrets.token_urlsafe(32)
+
+    def last_webhook_event(self, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        current = state or self.read()
+        payload = self._default_webhook_event()
+        raw_value = current.get("last_webhook_event")
+        if isinstance(raw_value, Mapping):
+            payload.update(dict(raw_value))
+        return payload
+
+    def record_webhook_event(
+        self,
+        *,
+        status: str,
+        message: str,
+        remote_addr: str = "",
+        user_agent: str = "",
+    ) -> dict[str, Any]:
+        state = self.read()
+        state["last_webhook_event"] = {
+            "status": status,
+            "message": message,
+            "received_at": datetime.now().isoformat(timespec="seconds"),
+            "remote_addr": remote_addr,
+            "user_agent": user_agent,
+        }
+        self.write(state)
+        return state["last_webhook_event"]
 
     def debug_enabled(self, state: dict[str, Any] | None = None) -> bool:
         current = state or self.read()
@@ -385,7 +463,15 @@ class AdminSettingsStore:
         if poll_interval < 0:
             raise AdminSettingsError("Auto-check interval cannot be negative.")
 
+        import_trigger_mode = str(form.get("import_trigger_mode", IMPORT_TRIGGER_MODE_OFF)).strip().lower()
+        if import_trigger_mode not in VALID_IMPORT_TRIGGER_MODES:
+            raise AdminSettingsError("Automatic import mode was invalid.")
+        if import_trigger_mode == IMPORT_TRIGGER_MODE_INTERVAL and poll_interval <= 0:
+            raise AdminSettingsError("Interval mode requires 1 or more minutes between checks.")
+
         state["poll_interval_minutes"] = poll_interval
+        state["import_trigger_mode"] = import_trigger_mode
+        state["webhook_trigger_token"] = self.webhook_trigger_token(state)
 
         scanner_auto_mode = str(form.get("scanner_auto_mode", MAIN_SCANNER_AUTO_MODE_OFF)).strip().lower()
         if scanner_auto_mode not in VALID_MAIN_SCANNER_AUTO_MODES:
@@ -1022,6 +1108,8 @@ def clear_parsed_data() -> int:
 
 
 def _is_auto_import_due(state: dict[str, Any]) -> bool:
+    if AdminSettingsStore().import_trigger_mode(state) != IMPORT_TRIGGER_MODE_INTERVAL:
+        return False
     interval_minutes = int(state.get("poll_interval_minutes") or 0)
     if interval_minutes <= 0:
         return False
