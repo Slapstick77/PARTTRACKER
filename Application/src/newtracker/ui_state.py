@@ -3013,7 +3013,7 @@ class UiStateStore:
             """
             SELECT
                 COALESCE(SUM(quantity_nested), 0) AS total_parts,
-                COALESCE(SUM(CASE WHEN requires_forming THEN quantity_nested ELSE 0 END), 0) AS total_forming_parts,
+                COALESCE(SUM(CASE WHEN requires_forming <> 0 THEN quantity_nested ELSE 0 END), 0) AS total_forming_parts,
                 COUNT(DISTINCT barcode_filename) AS dat_count,
                 COUNT(DISTINCT part_number || '|' || COALESCE(part_revision, '')) AS distinct_parts
             FROM resolved_nest_parts
