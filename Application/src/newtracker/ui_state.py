@@ -3032,35 +3032,29 @@ class UiStateStore:
         }
 
     def _load_monitor_progress(self, connection, com_number: str) -> dict[str, int]:
-        row = connection.execute(
+        flat_rows = connection.execute(
             """
-            SELECT
-                COALESCE((
-                    SELECT SUM(scanned_quantity)
-                    FROM (
-                        SELECT MAX(fi.scanned_quantity) AS scanned_quantity
-                        FROM flat_scan_items fi
-                        JOIN resolved_nest_parts r ON r.nest_part_id = fi.nest_part_id
-                        WHERE r.com_number = ?
-                        GROUP BY fi.nest_part_id
-                    ) AS flat_totals
-                ), 0) AS flat_done,
-                COALESCE((
-                    SELECT SUM(scanned_quantity)
-                    FROM (
-                        SELECT MAX(fbi.scanned_quantity) AS scanned_quantity
-                        FROM forming_batch_items fbi
-                        JOIN resolved_nest_parts r ON r.nest_part_id = fbi.nest_part_id
-                        WHERE r.com_number = ?
-                        GROUP BY fbi.nest_part_id
-                    ) AS forming_totals
-                ), 0) AS forming_done
+            SELECT MAX(fi.scanned_quantity) AS scanned_quantity
+            FROM flat_scan_items fi
+            JOIN resolved_nest_parts r ON r.nest_part_id = fi.nest_part_id
+            WHERE r.com_number = ?
+            GROUP BY fi.nest_part_id
             """,
-            (com_number, com_number),
-        ).fetchone()
+            (com_number,),
+        ).fetchall()
+        forming_rows = connection.execute(
+            """
+            SELECT MAX(fbi.scanned_quantity) AS scanned_quantity
+            FROM forming_batch_items fbi
+            JOIN resolved_nest_parts r ON r.nest_part_id = fbi.nest_part_id
+            WHERE r.com_number = ?
+            GROUP BY fbi.nest_part_id
+            """,
+            (com_number,),
+        ).fetchall()
         return {
-            "flat_done": int(row["flat_done"] or 0) if row is not None else 0,
-            "forming_done": int(row["forming_done"] or 0) if row is not None else 0,
+            "flat_done": sum(int(row["scanned_quantity"] or 0) for row in flat_rows),
+            "forming_done": sum(int(row["scanned_quantity"] or 0) for row in forming_rows),
         }
 
     @staticmethod
@@ -3496,19 +3490,24 @@ class UiStateStore:
                 DELETE FROM forming_batches;
                 DELETE FROM monitor_unit_sources;
                 DELETE FROM monitor_units;
-                DELETE FROM sqlite_sequence WHERE name IN (
-                    'scan_events',
-                    'part_tracker_items',
-                    'part_tracker_history',
-                    'flat_scan_items',
-                    'flat_scan_sessions',
-                    'forming_batch_items',
-                    'forming_batches',
-                    'monitor_unit_sources',
-                    'monitor_units'
-                );
                 """
             )
+            if self._db_backend() != "sqlserver":
+                connection.execute(
+                    """
+                    DELETE FROM sqlite_sequence WHERE name IN (
+                        'scan_events',
+                        'part_tracker_items',
+                        'part_tracker_history',
+                        'flat_scan_items',
+                        'flat_scan_sessions',
+                        'forming_batch_items',
+                        'forming_batches',
+                        'monitor_unit_sources',
+                        'monitor_units'
+                    )
+                    """
+                )
             connection.commit()
 
         UiStateStore.clear_all_persisted_state()
