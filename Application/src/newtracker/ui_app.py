@@ -396,7 +396,7 @@ def create_ui_app() -> Flask:
             "debug_reports": debug_reports_context(settings),
             "last_import": admin_store.latest_import_result(settings),
             "import_monitor": admin_store.import_monitor(),
-            "webhook_trigger_endpoint": url_for("api_process_ping", _external=True),
+            "webhook_trigger_endpoint": url_for("api_process_ping", _external=True, _scheme="https"),
             "webhook_trigger_token": admin_store.webhook_trigger_token(settings),
             "last_webhook_event": admin_store.last_webhook_event(settings),
             "admin_username": admin_store.admin_username(settings),
