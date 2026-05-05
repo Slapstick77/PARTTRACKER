@@ -3015,7 +3015,7 @@ class UiStateStore:
                 COALESCE(SUM(quantity_nested), 0) AS total_parts,
                 COALESCE(SUM(CASE WHEN requires_forming <> 0 THEN quantity_nested ELSE 0 END), 0) AS total_forming_parts,
                 COUNT(DISTINCT barcode_filename) AS dat_count,
-                COUNT(DISTINCT part_number || '|' || COALESCE(part_revision, '')) AS distinct_parts
+                COUNT(DISTINCT CONCAT(part_number, '|', COALESCE(part_revision, ''))) AS distinct_parts
             FROM resolved_nest_parts
             WHERE com_number = ?
             """,
@@ -3043,7 +3043,7 @@ class UiStateStore:
                         JOIN resolved_nest_parts r ON r.nest_part_id = fi.nest_part_id
                         WHERE r.com_number = ?
                         GROUP BY fi.nest_part_id
-                    )
+                    ) AS flat_totals
                 ), 0) AS flat_done,
                 COALESCE((
                     SELECT SUM(scanned_quantity)
@@ -3053,7 +3053,7 @@ class UiStateStore:
                         JOIN resolved_nest_parts r ON r.nest_part_id = fbi.nest_part_id
                         WHERE r.com_number = ?
                         GROUP BY fbi.nest_part_id
-                    )
+                    ) AS forming_totals
                 ), 0) AS forming_done
             """,
             (com_number, com_number),
